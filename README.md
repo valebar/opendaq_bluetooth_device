@@ -1,8 +1,31 @@
-# openDAQ Bluetooth device module
+# openDAQ Bluetooth Low Energy (BLE) device module
 
-An [openDAQ](https://opendaq.com) module that makes nearby **Bluetooth Low Energy** peripherals
-appear in openDAQ's normal device discovery and lets an application connect to one with a
-`bluetooth://…` connection string.
+Connect **Bluetooth Low Energy (BLE) sensors and devices to
+[openDAQ](https://opendaq.com)** on Linux, Windows, and macOS. This cross-platform C++ openDAQ
+device module adds Bluetooth discovery, GATT access, measurement signals, smart-trainer control,
+and automatic reconnection through openDAQ's standard device API.
+
+Use it to bring Bluetooth heart-rate sensors, cycling power meters, speed and cadence sensors, and
+FTMS indoor trainers into an openDAQ data-acquisition application. Nearby BLE peripherals appear
+in normal openDAQ device discovery and connect with a `bluetooth://...` connection string, so an
+application does not need to call BlueZ, C++/WinRT, or CoreBluetooth directly.
+
+## openDAQ Bluetooth features
+
+- Discover and connect to Bluetooth Low Energy peripherals through an openDAQ `Instance`.
+- Decode Bluetooth SIG Heart Rate, Cycling Power, Cycling Speed and Cadence, and Fitness Machine
+  Service (FTMS) data into timestamped openDAQ signals.
+- Browse any connected device's GATT services and characteristics as openDAQ properties.
+- Read and write BLE GATT characteristics, including vendor-specific characteristics.
+- Control compatible Bluetooth smart trainers in ERG, resistance, and simulation modes.
+- Reconnect automatically without replacing existing openDAQ channels, signals, or stream readers.
+- Use native Bluetooth backends on Linux (BlueZ), Windows (C++/WinRT), and macOS
+  (CoreBluetooth).
+
+## Quick start: discover and connect to a Bluetooth device
+
+After building the module and making it available to the openDAQ ModuleManager, discover nearby
+Bluetooth devices and connect using the returned connection string:
 
 ```cpp
 auto instance = Instance();
@@ -49,7 +72,7 @@ device.getPropertyValue("Battery Service.Battery Level");     // 75, an integer
 device.setPropertyValue("Nordic UART.Nordic UART RX", "01 A2");
 ```
 
-## Measurement signals
+## Supported openDAQ Bluetooth measurement signals
 
 A peripheral implementing a GATT service this module understands gets an openDAQ **channel**
 carrying decoded signals, alongside the raw GATT database. Four profiles are implemented:
@@ -176,7 +199,7 @@ rather than an indoor bike, say. Adding another profile means one entry in the r
 `bluetooth_module/src/profiles/gatt_profile.cpp`, plus the decoder and channel behind it — no
 change to the device, the discovery path or the backends.
 
-## Status
+## Platform support for openDAQ Bluetooth
 
 | Platform | Backend | State |
 | --- | --- | --- |
@@ -235,7 +258,7 @@ because most of them are about *threading*, not about WinRT syntax:
   mangling it into a plausible 48-bit address; and the missing
   `<winrt/Windows.Devices.Radios.h>` include — the file's only actual compile error — is in.
 
-## Building
+## Build the openDAQ Bluetooth module
 
 Requires CMake ≥ 3.24 and a C++17 compiler. On Linux also `libsystemd-dev` (for sd-bus) and a
 running `bluetooth` service.
@@ -252,7 +275,7 @@ minutes. To use an SDK you already have, pass `-DOPENDAQ_BT_USE_SYSTEM_SDK=ON`, 
 The module lands in `build/bin/` as `libbluetooth_module.module.so` (`.dll` / `.dylib` elsewhere).
 Point an openDAQ application at that directory, or set `OPENDAQ_MODULES_PATH`.
 
-## Connection strings
+## Bluetooth connection strings
 
 ```
 bluetooth://AA:BB:CC:DD:EE:FF                        Linux, Windows
@@ -281,7 +304,7 @@ A peripheral's service list often arrives in a scan response a moment after its 
 advertisement, so a device can be missing from one `getAvailableDevices()` call and present in the
 next. Run discovery more than once, or give `ScanWarmupMs` room.
 
-## Losing the link
+## Bluetooth disconnection and automatic reconnection
 
 A BLE peripheral wanders out of range; that is normal, not a fault. When the link drops the device
 goes to `Reconnecting` and the module retries indefinitely in the background, and when the
@@ -313,7 +336,7 @@ Four things worth knowing:
   all. That is a gap in the Linux backend, not in the reconnector.
 - Reconnection has been exercised against a radio on Linux only.
 
-## Configuration
+## Configure Bluetooth discovery and connections
 
 | Property | Default | Scope | Meaning |
 | --- | --- | --- | --- |
@@ -347,7 +370,7 @@ Module-level settings reach the module through openDAQ's config providers, under
 
 `bt_cli` enables the environment provider, so the variable above works with it directly.
 
-## What a connected device exposes
+## Bluetooth GATT devices and properties in openDAQ
 
 Device properties `Address`, `Name`, `Connected` and `MtuSize` are read-only mirrors of the
 peripheral's state. `Connected` means there is a live link *right now*: it flips to false the
@@ -408,9 +431,9 @@ channels still browses readably enough to show why.
 
 Channels carry properties of their own: read-only mirrors of sensor state, the writable
 `WheelCircumferenceMm` on each cycling channel, and the trainer control actions. See
-[Measurement signals](#measurement-signals).
+[Supported openDAQ Bluetooth measurement signals](#supported-opendaq-bluetooth-measurement-signals).
 
-## Command line
+## Bluetooth command-line tool
 
 `bt_cli` drives the module exactly as an application would — through an openDAQ `Instance` that
 loads the built module from disk.
@@ -429,7 +452,7 @@ loads the built module from disk.
 first. A smart trainer hosts three profiles at once and around forty signals, which is an
 unreadable wall at 4 Hz — pass a channel local id as the last argument to narrow it.
 
-## Tests
+## Test the openDAQ Bluetooth module
 
 ```bash
 ctest --test-dir build --output-on-failure
@@ -441,7 +464,7 @@ built shared library through a real openDAQ `Instance` and checks the things uni
 the library is named so the ModuleManager finds it, that its exports resolve, and that the
 `bluetooth` prefix routes back to this module.
 
-## Platform notes
+## Bluetooth platform notes
 
 **Linux.** Needs D-Bus access to `org.bluez` — normally membership of the `bluetooth` group, or a
 polkit rule — and a powered adapter. Both conditions are reported as the reason discovery is empty
@@ -478,7 +501,7 @@ a service this module has a profile for, even with `FilterByKnownProfiles` off. 
 report every connected peripheral and filter afterwards. Reporting connected peripherals at all is
 verified on Linux only; the Windows and macOS paths compile but have not run against a radio.
 
-## Scope
+## Project scope and limitations
 
 Discovery, connection, GATT browsing with characteristic reads and writes, and notification-driven
 asynchronous signals for four profiles: Heart Rate, Cycling Power, Cycling Speed and Cadence, and
