@@ -275,6 +275,12 @@ minutes. To use an SDK you already have, pass `-DOPENDAQ_BT_USE_SYSTEM_SDK=ON`, 
 The module lands in `build/bin/` as `libbluetooth_module.module.so` (`.dll` / `.dylib` elsewhere).
 Point an openDAQ application at that directory, or set `OPENDAQ_MODULES_PATH`.
 
+On **Windows/ARM64** the top-level `CMakeLists.txt` corrects `CMAKE_SYSTEM_PROCESSOR`, and
+`cmake/CMakeASM_ARMASMLinkerInformation.cmake` supplies a module CMake 3.31 requires and Boost
+1.82 does not ship. Without them openDAQ v3.40.1 does not build there: RapidJSON pulls in SSE2
+intrinsics and Boost.Context tries to assemble x86 with MASM. No extra flags are needed — see
+*Windows on ARM64* in `DEVELOPMENT.md` for why.
+
 ## Bluetooth connection strings
 
 ```

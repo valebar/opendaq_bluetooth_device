@@ -18,6 +18,29 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Windows on ARM64: CMAKE_SYSTEM_PROCESSOR describes the *host*, and CMake reads that from the
+# environment of the process it runs in. Every cmake.exe shipped for Windows today is an x64
+# binary, so on an ARM64 machine it runs under emulation and reports AMD64 -- while the toolchain
+# it drives is quite correctly the ARM64 cl.exe/link.exe under Hostarm64. Third-party CMake inside
+# the fetched openDAQ tree keys its architecture decisions off CMAKE_SYSTEM_PROCESSOR, so left
+# uncorrected an ARM64 build selects x86-only code paths and fails to compile:
+#
+#   * RapidJSON force-enables RAPIDJSON_SSE2 for "AMD64" and then includes <emmintrin.h>, which
+#     MSVC refuses to parse for an ARM64 target unless USE_SOFT_INTRINSICS is defined.
+#   * Boost.Context resolves to architecture x86_64 / ABI ms / assembler masm and feeds x86
+#     assembly to masm.targets, which answers "MASM not supported on this platform".
+#
+# Correcting the variable fixes every such consumer at once, and it is the value those checks were
+# always meant to see -- far safer than patching each one. x64 is left alone: "AMD64" is exactly
+# what the same checks expect there, and rewriting it to "x64" would match none of them and
+# silently disable SIMD that is genuinely available. ARM64EC is left alone too, being ARM64 code
+# under an x64-compatible ABI where the x86 paths are not simply wrong. The condition asks MSVC
+# what it is targeting rather than asking the generator, so it holds under Ninja too.
+if (MSVC AND CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
+    set(CMAKE_SYSTEM_PROCESSOR ARM64)
+    message(STATUS "Windows/ARM64: CMAKE_SYSTEM_PROCESSOR corrected to ARM64")
+endif()
+
 # The macOS BLE backend is Objective-C++, so that language has to be enabled -- and it has to
 # happen here, at file scope in the top-level directory. enable_language() called from inside a
 # function (which is where this used to live, in opendaq_bt_add_ble_backend) loads the language's

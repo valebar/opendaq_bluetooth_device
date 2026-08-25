@@ -394,6 +394,52 @@ The following settings are required for a successful build.
   `DEFINE_MODULE_EXPORTS` defines `daq::daqSharedLibObjectCount` whose declaration sits behind
   that guard.
 
+### Windows on ARM64
+
+openDAQ v3.40.1 does not build on Windows/ARM64 as it stands. Two of its vendored dependencies
+pick x86 code paths and fail; both come from the same root cause, and the top-level
+`CMakeLists.txt` fixes them together. The symptoms are worth recognising, because neither error
+message mentions the architecture that actually went wrong:
+
+- `emmintrin.h(20,1): error C1189: This header is specific to X86, X64, ARM64, and ARM64EC
+  targets` while compiling `daqcoretypes`. RapidJSON turned on `RAPIDJSON_SSE2`. The message is
+  misleading -- MSVC's `emmintrin.h` only accepts an ARM64 target when `USE_SOFT_INTRINSICS` is
+  defined, which nothing here does.
+- `masm.targets(70,5): error MSB3721: The command "echo MASM not supported on this platform"`
+  while building `boost_context`. Boost.Context selected the `x86_64`/`ms`/`masm` combination and
+  handed x86 assembly to an assembler that does not exist for this host.
+
+**Root cause.** `CMAKE_SYSTEM_PROCESSOR` names the *host*, and CMake takes it from the environment
+of its own process. Every cmake.exe distributed for Windows is still an x64 binary, so on an ARM64
+machine it runs emulated and reports `AMD64` -- from a native ARM64 PowerShell just as much as from
+an emulated shell, since it is the emulation and not the shell that decides. Meanwhile the
+toolchain being driven is genuinely ARM64 (`CMAKE_CXX_COMPILER_ARCHITECTURE_ID`, and the
+`cl.exe`/`link.exe` under `Hostarm64`). Every dependency that branches on `CMAKE_SYSTEM_PROCESSOR`
+therefore configures itself for x86. openDAQ's own `BUILD_ARM` never fires either: it is guarded on
+`UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES aarch`, so the SDK has no Windows/ARM64 path at all.
+
+Setting `CMAKE_SYSTEM_PROCESSOR` to `ARM64` after `project()` corrects every consumer at once --
+RapidJSON drops to its scalar path, and Boost.Context resolves to `arm64`/`aapcs`/`pe`/`armasm`,
+which is exactly the combination its ARM64 `.asm` sources are written for. `BUILD_ARM` is
+deliberately *not* set: it would additionally hand `-Wno-error=type-limits`, a GCC flag, to MSVC.
+
+**`cmake/CMakeASM_ARMASMLinkerInformation.cmake`** exists because of a second, unrelated collision.
+CMake has no `ASM_ARMASM` language -- its Microsoft ARM assembler dialect is `ASM_MARMASM` -- so
+Boost 1.82 ships its own language definition for `ASM_ARMASM` in `libs/context/cmake`. CMake 3.31
+then added a mandatory fourth per-language module, `CMake<LANG>LinkerInformation.cmake`, which
+Boost 1.82 predates, and configuration aborts with `Could not find cmake module file`. That file
+supplies it; it is found because the top-level `CMakeLists.txt` puts `cmake/` on
+`CMAKE_MODULE_PATH`. It can go once openDAQ pins a Boost that knows about the CMake 3.31
+requirement. The `CMAKE_SYSTEM_PROCESSOR` correction has a different expiry: it becomes a no-op
+the day a native ARM64 cmake.exe is what people run, and is harmless in the meantime.
+
+Verified on Windows 11 ARM64 with MSVC 14.44 and CMake 3.31.3, using the Visual Studio 17 2022
+generator (Ninja was not installed on that machine, so the `-G Ninja` line above is untested
+there; the fix keys off `CMAKE_CXX_COMPILER_ARCHITECTURE_ID`, which MSVC reports under either
+generator). `dumpbin /headers` reports `AA64 machine (ARM64)` for `bluetooth_module.module.dll`.
+Note that the Boost static libraries are still named `...-x64-1_82.lib`: that tag is Boost's own
+address-model naming and says nothing about the ISA -- those archives contain ARM64 objects.
+
 ### openDAQ API notes worth not rediscovering
 
 - Module base: subclass `daq::Module`, override `onGetAvailableDevices`, `onGetAvailableDeviceTypes`,
