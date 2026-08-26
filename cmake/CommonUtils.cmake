@@ -1,7 +1,7 @@
 # Helpers shared by the module and application targets.
 
 # Selects the single BLE backend source appropriate for the target platform and applies the
-# platform's link requirements. Exactly one backend is ever compiled; the other two are not
+# platform's link requirements. Exactly one backend is ever compiled; the others are not
 # added to the target at all, so they never need to parse on a foreign toolchain.
 function(opendaq_bt_add_ble_backend TARGET)
     if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -41,9 +41,15 @@ function(opendaq_bt_add_ble_backend TARGET)
                               ${CORE_BLUETOOTH_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
         target_compile_definitions(${TARGET} PRIVATE OPENDAQ_BT_BACKEND_COREBLUETOOTH)
 
+    elseif (CMAKE_SYSTEM_NAME STREQUAL "Android")
+        # JNI headers and system libraries come from the NDK toolchain.
+        target_sources(${TARGET} PRIVATE src/ble/ble_central_android.cpp src/ble/android_jni.cpp)
+        target_link_libraries(${TARGET} PRIVATE log android)
+        target_compile_definitions(${TARGET} PRIVATE OPENDAQ_BT_BACKEND_ANDROID)
+
     else()
         message(FATAL_ERROR
                 "No BLE backend for CMAKE_SYSTEM_NAME='${CMAKE_SYSTEM_NAME}'. "
-                "Supported: Linux, Windows, Darwin.")
+                "Supported: Linux, Windows, Darwin, Android.")
     endif()
 endfunction()

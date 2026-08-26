@@ -1,14 +1,14 @@
 # openDAQ Bluetooth Low Energy (BLE) device module
 
 Connect **Bluetooth Low Energy (BLE) sensors and devices to
-[openDAQ](https://opendaq.com)** on Linux, Windows, and macOS. This cross-platform C++ openDAQ
-device module adds Bluetooth discovery, GATT access, measurement signals, smart-trainer control,
-and automatic reconnection through openDAQ's standard device API.
+[openDAQ](https://opendaq.com)** on Linux, Windows, macOS, and Android. This cross-platform C++
+openDAQ device module adds Bluetooth discovery, GATT access, measurement signals, smart-trainer
+control, and automatic reconnection through openDAQ's standard device API.
 
 Use it to bring Bluetooth heart-rate sensors, cycling power meters, speed and cadence sensors, and
 FTMS indoor trainers into an openDAQ data-acquisition application. Nearby BLE peripherals appear
 in normal openDAQ device discovery and connect with a `bluetooth://...` connection string, so an
-application does not need to call BlueZ, C++/WinRT, or CoreBluetooth directly.
+application does not need to call BlueZ, C++/WinRT, CoreBluetooth, or `android.bluetooth` directly.
 
 ## openDAQ Bluetooth features
 
@@ -206,6 +206,7 @@ change to the device, the discovery path or the backends.
 | Linux | BlueZ over D-Bus (sd-bus) | **Built and verified against real hardware** |
 | Windows | C++/WinRT | **Compiles and loads (ARM64, MSVC)** — not yet run against a radio, see below |
 | macOS | CoreBluetooth (Objective-C++) | **Built and verified against real hardware** (arm64, macOS 15) |
+| Android | JNI over `android.bluetooth` | **Cross-compiles for arm64-v8a and armeabi-v7a (NDK 27+)**; arm64-v8a loads and passes its suites on a physical device, armeabi-v7a has never been executed — never run against a radio, see below |
 
 On macOS, discovery, connecting, GATT resolution, characteristic reads and heart-rate notification
 streaming have all been run against a live peripheral. Characteristic **writes** and **two
@@ -258,6 +259,22 @@ because most of them are about *threading*, not about WinRT syntax:
   mangling it into a plausible 48-bit address; and the missing
   `<winrt/Windows.Devices.Radios.h>` include — the file's only actual compile error — is in.
 
+Android uses JNI and a Java shim because the NDK has no Bluetooth API, so it ships as an **AAR**.
+The module and openDAQ v3.40.1 build unpatched (minSdk 26) for both ABIs the AAR carries,
+`arm64-v8a` and `armeabi-v7a`.
+
+The two ABIs are **not** equally verified, and the difference matters:
+
+- **`arm64-v8a`** loads successfully and passes all 238 unit tests and 5 module-loading tests,
+  both on an arm64 emulator and on a physical Pixel 8a running Android 17.
+- **`armeabi-v7a` has never been executed at all.** It compiles, links and packages, and the
+  binary has been checked to be genuine 32-bit ARM with no text relocations — but no 32-bit
+  binary from this project has ever run. Apple Silicon has no AArch32 support and current arm64
+  emulator images carry no 32-bit userspace, so exercising it needs a physical device with 32-bit
+  support.
+
+**Radio-dependent behavior and permission flows remain unverified on Android**, on either ABI.
+
 ## Build the openDAQ Bluetooth module
 
 Requires CMake ≥ 3.24 and a C++17 compiler. On Linux also `libsystemd-dev` (for sd-bus) and a
@@ -280,6 +297,67 @@ On **Windows/ARM64** the top-level `CMakeLists.txt` corrects `CMAKE_SYSTEM_PROCE
 1.82 does not ship. Without them openDAQ v3.40.1 does not build there: RapidJSON pulls in SSE2
 intrinsics and Boost.Context tries to assemble x86 with MASM. No extra flags are needed — see
 *Windows on ARM64* in `DEVELOPMENT.md` for why.
+
+### Build for Android
+
+Android produces an **AAR**, because the backend needs Java classes alongside the native library
+(see *Platform support* above). It requires the Android SDK, NDK 27+, JDK 17+, and Gradle 8.13+.
+
+```bash
+cd android && gradle assembleRelease
+```
+
+The AAR is written to `android/build/outputs/aar/opendaq-bluetooth-release.aar` and carries both
+`arm64-v8a` and `armeabi-v7a`.
+
+**A cold build compiles openDAQ and Boost once per ABI**, so the default two-ABI build takes
+roughly twice as long as a single-ABI one. Narrow it while iterating:
+
+```bash
+cd android && gradle assembleRelease -PabiFilters=arm64-v8a
+```
+
+`-PabiFilters` takes a comma-separated list and defaults to `arm64-v8a,armeabi-v7a`, so a release
+AAR is complete unless you ask otherwise. `-PopendaqSourceDir=...` and `-PboostSourceDir=...`
+reuse local sources and are shared safely across ABIs — the FetchContent source trees are
+read-only, and each ABI still gets its own build directory.
+
+The `armeabi-v7a` half of the AAR contains `libopendaq-32-3.so` where the `arm64-v8a` half has
+`libopendaq-64-3.so`; openDAQ names its libraries after pointer width. That is expected, and
+nothing resolves those names by hand.
+
+The project has no committed Gradle wrapper; run `gradle wrapper` locally if needed.
+
+To build test executables for a device — a CMake cache cannot be re-pointed at another ABI, so
+each ABI needs its own build directory:
+
+```bash
+cmake -S . -B build-android-arm64-v8a -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+      -DCMAKE_BUILD_TYPE=Release -DOPENDAQ_BT_BUILD_TESTS=ON
+cmake --build build-android-arm64-v8a -j "$(nproc)"
+
+cmake -S . -B build-android-armeabi-v7a -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+      -DANDROID_ABI=armeabi-v7a -DANDROID_PLATFORM=android-26 \
+      -DCMAKE_BUILD_TYPE=Release -DOPENDAQ_BT_BUILD_TESTS=ON
+cmake --build build-android-armeabi-v7a -j "$(nproc)"
+```
+
+Tests and the CLI default to off on Android. Push the explicitly enabled tests with `adb`, from
+the build directory matching the device's ABI (`adb shell getprop ro.product.cpu.abi`):
+
+```bash
+adb push build-android-arm64-v8a/bin /data/local/tmp/odbt
+adb shell 'cd /data/local/tmp/odbt && LD_LIBRARY_PATH=. \
+           OPENDAQ_BT_MODULE_DIR=/data/local/tmp/odbt ./bluetooth_module_loading_tests'
+```
+
+Running the `armeabi-v7a` binaries needs a physical device with 32-bit userspace support. Apple
+Silicon cannot execute them at all, and current arm64 emulator images ship no 32-bit runtime.
+
+Use `llvm-strip --strip-unneeded` before pushing large debug builds.
 
 ## Bluetooth connection strings
 
@@ -470,6 +548,9 @@ built shared library through a real openDAQ `Instance` and checks the things uni
 the library is named so the ModuleManager finds it, that its exports resolve, and that the
 `bluetooth` prefix routes back to this module.
 
+Both suites can run on Android over `adb` without a radio. `connectedDebugAndroidTest` additionally
+checks the Java/JNI binding and catches shrinker removal of the bridge classes.
+
 ## Bluetooth platform notes
 
 **Linux.** Needs D-Bus access to `org.bluez` — normally membership of the `bluetooth` group, or a
@@ -506,6 +587,29 @@ no "everything" form, so on macOS a peripheral connected to the host is reported
 a service this module has a profile for, even with `FilterByKnownProfiles` off. Linux and Windows
 report every connected peripheral and filter afterwards. Reporting connected peripherals at all is
 verified on Linux only; the Windows and macOS paths compile but have not run against a radio.
+
+**Android.** Consume the AAR, then, before building the openDAQ `Instance`:
+
+```java
+OpenDaqBluetooth.initialize(context);
+// ... request OpenDaqBluetooth.requiredPermissions() from an Activity ...
+InstancePtr instance = InstanceBuilder()
+    .addModulePath(OpenDaqBluetooth.moduleDirectory(context))
+    .build();
+```
+
+`initialize()` loads the JNI bridge and caches its Java classes. The module path must be explicit
+because openDAQ's executable-based default points into `/system/bin` on Android.
+
+The application must also extract native libraries so `ModuleManager` can scan them:
+
+```gradle
+android { packaging { jniLibs { useLegacyPackaging = true } } }
+```
+
+Request the strings returned by `requiredPermissions()` from an Activity: API 31+ uses
+`BLUETOOTH_SCAN` and `BLUETOOTH_CONNECT`; older releases use `ACCESS_FINE_LOCATION`. The AAR ships
+consumer ProGuard rules for the JNI bridge.
 
 ## Project scope and limitations
 

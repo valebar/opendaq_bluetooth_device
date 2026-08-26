@@ -1,3 +1,18 @@
 build/
 .cache/
 compile_commands.json
+/.DS_Store
+/.editor.prj
+
+# Android/Gradle output and local configuration.
+.gradle/
+.kotlin/
+local.properties
+android/.cxx/
+build-android*/
+*.hprof
+
+# The repository does not commit a Gradle wrapper.
+gradlew
+gradlew.bat
+**/gradle/wrapper/

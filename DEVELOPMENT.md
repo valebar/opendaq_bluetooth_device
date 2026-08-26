@@ -39,6 +39,32 @@ env OPENDAQ_CONFIG_Modules_BluetoothModule_FilterByKnownProfiles=false ./build/b
 Useful CMake options: `OPENDAQ_BT_USE_SYSTEM_SDK` (use an installed SDK rather than FetchContent),
 `OPENDAQ_BT_BUILD_TESTS`, `OPENDAQ_BT_BUILD_APP`.
 
+The Android AAR is a separate Gradle project under `android/`; the root remains a CMake project.
+There is no committed Gradle wrapper.
+
+```bash
+# AAR (carries arm64-v8a and armeabi-v7a): android/build/outputs/aar/opendaq-bluetooth-release.aar
+cd android && gradle assembleRelease
+cd android && gradle assembleRelease -PabiFilters=arm64-v8a   # one ABI, ~half the build
+cd android && gradle connectedDebugAndroidTest   # needs a device or emulator
+
+# Cross-compile tests for adb. One build dir per ABI -- a CMake cache cannot be re-pointed.
+cmake -S . -B build-android-arm64-v8a -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+      -DCMAKE_BUILD_TYPE=Release -DOPENDAQ_BT_BUILD_TESTS=ON
+cmake --build build-android-arm64-v8a -j "$(nproc)"
+
+llvm-strip --strip-unneeded build-android-arm64-v8a/bin/*.so \
+                            build-android-arm64-v8a/bin/bluetooth_module_*tests
+adb push build-android-arm64-v8a/bin /data/local/tmp/odbt   # match the device's ABI
+adb shell 'cd /data/local/tmp/odbt && LD_LIBRARY_PATH=. \
+           OPENDAQ_BT_MODULE_DIR=/data/local/tmp/odbt ./bluetooth_module_loading_tests'
+adb shell 'cd /data/local/tmp/odbt && LD_LIBRARY_PATH=. ./bluetooth_module_tests'
+```
+
+`OPENDAQ_BT_MODULE_DIR` overrides the host path compiled into the loading test.
+
 ## Signals and profiles
 
 A GATT service the module understands becomes an openDAQ **channel** under the device's IO folder.
@@ -149,6 +175,7 @@ BLE backends      ble_central_bluez.cpp          (Linux, sd-bus / org.bluez)
 (no openDAQ headers)
                   ble_central_winrt.cpp          (Windows, C++/WinRT)
                   ble_central_corebluetooth.mm   (macOS, Objective-C++)
+                  ble_central_android.cpp        (Android, JNI + android/src/main/java shim)
                   tests/fake_ble_central.h       (scripted, used by every unit test)
 ```
 
@@ -163,6 +190,16 @@ unexercised there.** **Windows compiles, links and loads (ARM64/MSVC) and its di
 exercised, but it has never seen a radio** — the bring-up host had no Bluetooth adapter — **and
 x64 has never been compiled.** Do not describe Windows scanning, connecting, GATT browsing or
 heart-rate streaming as working.
+
+**Android cross-compiles for arm64-v8a and armeabi-v7a (minSdk 26); arm64-v8a loads but has not
+been tested with a radio, and armeabi-v7a has never been executed at all.** On arm64-v8a the
+loading and unit suites pass both on an emulator and on a physical Pixel 8a (Android 17); all
+radio and permission paths remain unverified, since those runs have no `Context` and so never
+open an adapter.
+
+For armeabi-v7a only the build is verified -- it compiles, links, and produces a genuine 32-bit
+ARM `.so` with no text relocations -- because Apple Silicon has no AArch32 support and current
+arm64 emulator images carry no 32-bit userspace. Do not describe armeabi-v7a as tested.
 
 The CoreBluetooth backend keeps **one `PeripheralState` block per connected peripheral**, held by
 `shared_ptr` and registered in `SharedState::peripherals` under the peripheral's identifier; every
@@ -191,6 +228,11 @@ stalls the message pump). Two rules follow, both easy to undo by accident:
   `BleError` at the single `Apartment::run()` choke point. Without that, a WinRT failure sails past
   every `catch (const std::exception&)` above the backend — including the one in
   `HeartRateChannel`'s destructor, where it means `std::terminate()`.
+
+Android needs a Java shim because Bluetooth is not exposed by the NDK. `OpenDaqBluetooth` is the
+entry point, while `ScanBridge` and `GattBridge` forward platform calls and callbacks. Policy and
+timeouts stay in `ble_central_android.cpp`. Callbacks use integer tokens backed by weak registries,
+so late callbacks cannot dereference destroyed C++ objects.
 
 `enable_language(OBJCXX)` for the macOS backend lives in the **top-level** `CMakeLists.txt`, not
 in `opendaq_bt_add_ble_backend()`. CMake only accepts `enable_language()` at file scope: called
@@ -374,6 +416,17 @@ dialect settings are also separate from `CMAKE_CXX_*` and are set alongside it.
   `createPlatformCentral()` to throw, so any accidental use of the production path fails loudly
   instead of touching a radio. `bluetooth_module_loading_tests` uses a separate main for this
   reason.
+- Serialize Android GATT operations per connection.
+- Keep `JNI_OnLoad` optional: `ModuleManager` uses `dlopen`, so initialization must also capture the
+  VM and export normal `Java_...` symbols.
+- Cache application classes during `OpenDaqBluetooth.initialize()`; attached native threads cannot
+  resolve them with `FindClass`.
+- An uninitialized bridge must report unavailable, not prevent the module from loading.
+- Notifications require both local enablement and a CCCD write.
+- Keep both pre-33 and API 33 read/notification callback overloads.
+- Keep scans idempotent to avoid Android's scan-start quota.
+- Close every `BluetoothGatt`, including failed handshakes and delayed cleanup after permission loss.
+- Handles include service and characteristic instance IDs.
 
 ### Build constraints imposed by the SDK
 
@@ -393,6 +446,55 @@ The following settings are required for a successful build.
 - `src/module_dll.cpp` alone is compiled with `OPENDAQ_TRACK_SHARED_LIB_OBJECT_COUNT`, because
   `DEFINE_MODULE_EXPORTS` defines `daq::daqSharedLibObjectCount` whose declaration sits behind
   that guard.
+- Preserve AGP's `CMAKE_LIBRARY_OUTPUT_DIRECTORY`; it is where AAR packaging looks for `.so` files.
+  This matters more with two ABIs: AGP hands a *different* one to each ABI's CMake invocation, and
+  overriding it would collapse both into a single directory. The top-level `CMakeLists.txt` guards
+  its own default with `if (NOT ANDROID OR NOT DEFINED ...)` for exactly this reason.
+- Tests and the CLI default to off on Android but remain switchable.
+- openDAQ v3.40.1 cross-compiles unpatched. minSdk 26 also satisfies mDNS's `getifaddrs` requirement.
+
+### Android on armeabi-v7a
+
+The AAR ships both `arm64-v8a` and `armeabi-v7a`; `-PabiFilters=<comma-separated>` narrows it while
+iterating, because each ABI is a full openDAQ + Boost cross-build. **No source or CMake change was
+needed for the 32-bit ABI** — which is worth recording, because several plausible 32-bit traps were
+checked and every one is already handled somewhere:
+
+- **Boost.Context selects the right assembly.** `openDAQBoostLibraryUtils.cmake` sets
+  `BOOST_CONTEXT_ARCHITECTURE` to `arm` (not `arm64`) and the ABI to `aapcs` when
+  `BUILD_ARM AND NOT BUILD_64Bit`, giving `{make,jump,ontop}_arm_aapcs_elf_gas.S`. `BUILD_ARM`
+  comes from `UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "^arm.*$"`, and the NDK sets
+  `CMAKE_SYSTEM_PROCESSOR=armv7-a`. This is the *same* mechanism that fails on Windows/ARM64 (see
+  below), and it works here only because the NDK derives the variable from the **target**, not the
+  host.
+- **Those `.S` files carry no `.arm` directive, and it does not matter.** They declare only
+  `.syntax unified`, while the NDK defaults `ANDROID_ARM_MODE` to `thumb`. That looks like a
+  silent runtime hazard — `make_fcontext` computes a return address with `adr`, and a `pop {pc}`
+  to an address with bit 0 clear switches to ARM state. It is not one: clang's integrated
+  assembler starts a `.S` file in ARM state regardless of `-mthumb`. Assembling all three under
+  `-mthumb` yields one `$a` mapping symbol per file, no `$t`, and 4-byte A32 encodings throughout;
+  the built `libboost_context.a` confirms it (the `$t` symbols in that archive are its C++
+  objects, which are Thumb as expected).
+  **Do not "fix" this by forcing `-DANDROID_ARM_MODE=arm`** — it is not broken.
+- **Position-independent code survives.** openDAQ gates PIC on `BUILD_64Bit OR BUILD_ARM`, and
+  `BUILD_ARM` carries it. Were it off, `native_streaming_protocol` would build non-PIC and
+  Android's linker rejects `DT_TEXTREL` outright.
+- **RapidJSON drops to its scalar path** (NEON is enabled only for a `CMAKE_SYSTEM_PROCESSOR`
+  of exactly `aarch64`), and `BUILD_ARM` still supplies `-Wno-error=type-limits` — precisely the
+  warning class 32-bit builds provoke.
+- **openDAQ renames its libraries by pointer width**, so `jni/armeabi-v7a/` holds
+  `libopendaq-32-3.so` where `jni/arm64-v8a/` holds `libopendaq-64-3.so`. Nothing resolves those
+  names by hand; they arrive through `DT_NEEDED`, and `ModuleManager` scans by extension.
+- **The JNI token type is load-bearing on 32-bit.** Tokens are `int64_t` registry keys, never
+  pointers cast to `jlong`, and they are passed into `J` slots of variadic `CallStatic*Method`
+  calls. AAPCS 8-byte-aligns 64-bit varargs on armv7, so passing an `int` there would shift every
+  following argument — a corruption that arm64 and x86-64 happen to tolerate. Keep them `int64_t`.
+- **`std::atomic<int64_t>` needs no `-latomic`.** ARMv7-A has `ldrexd`/`strexd`, so clang inlines
+  it; the generated assembly contains no `__atomic_*` calls.
+- **`time_t` is 32 bits on armeabi-v7a even at API 26.** The channel domain epoch is anchored via
+  `system_clock::now()` in `profiles/channel_support.cpp`, and bionic truncates at that libc
+  boundary. All arithmetic above it is `int64_t` microseconds, so nothing here overflows before
+  2038 — but the anchor itself is a Y2038 value on this ABI.
 
 ### Windows on ARM64
 
@@ -467,6 +569,8 @@ covered by unit tests over the full flag matrix of each wire format and share al
 and signal machinery heart rate exercises, but no trainer, power meter or cadence sensor has been
 on the other end, and trainer control depends on the characteristic-write path documented above as
 unexercised on macOS. They should not be described as verified.
+
+Android ships an AAR, not an application. The consuming app requests runtime permissions.
 
 Deliberately **not** implemented: profiles beyond those four; the Fitness Machine service for
 treadmills, rowers, cross trainers and stair climbers, whose data characteristics are named in
