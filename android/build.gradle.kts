@@ -9,9 +9,15 @@ android {
     defaultConfig {
         minSdk = 26
 
-        // Each ABI requires another full openDAQ build.
+        // Each ABI is a full openDAQ + Boost cross-build, so a cold two-ABI build takes
+        // roughly twice as long and twice the disk. Narrow it while iterating with
+        // -PabiFilters=arm64-v8a; a release AAR is complete by default.
         ndk {
-            abiFilters += "arm64-v8a"
+            abiFilters += (project.findProperty("abiFilters") as String?)
+                ?.split(",")
+                ?.map { it.trim() }
+                ?.filter { it.isNotEmpty() }
+                ?: listOf("arm64-v8a", "armeabi-v7a")
         }
 
         externalNativeBuild {

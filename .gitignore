@@ -9,7 +9,7 @@ compile_commands.json
 .kotlin/
 local.properties
 android/.cxx/
-build-android/
+build-android*/
 *.hprof
 
 # The repository does not commit a Gradle wrapper.

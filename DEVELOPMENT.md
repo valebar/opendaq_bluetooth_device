@@ -43,19 +43,21 @@ The Android AAR is a separate Gradle project under `android/`; the root remains 
 There is no committed Gradle wrapper.
 
 ```bash
-# AAR: android/build/outputs/aar/opendaq-bluetooth-release.aar
+# AAR (carries arm64-v8a and armeabi-v7a): android/build/outputs/aar/opendaq-bluetooth-release.aar
 cd android && gradle assembleRelease
+cd android && gradle assembleRelease -PabiFilters=arm64-v8a   # one ABI, ~half the build
 cd android && gradle connectedDebugAndroidTest   # needs a device or emulator
 
-# Cross-compile tests for adb
-cmake -S . -B build-android -G Ninja \
+# Cross-compile tests for adb. One build dir per ABI -- a CMake cache cannot be re-pointed.
+cmake -S . -B build-android-arm64-v8a -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
       -DCMAKE_BUILD_TYPE=Release -DOPENDAQ_BT_BUILD_TESTS=ON
-cmake --build build-android -j "$(nproc)"
+cmake --build build-android-arm64-v8a -j "$(nproc)"
 
-llvm-strip --strip-unneeded build-android/bin/*.so build-android/bin/bluetooth_module_*tests
-adb push build-android/bin /data/local/tmp/odbt
+llvm-strip --strip-unneeded build-android-arm64-v8a/bin/*.so \
+                            build-android-arm64-v8a/bin/bluetooth_module_*tests
+adb push build-android-arm64-v8a/bin /data/local/tmp/odbt   # match the device's ABI
 adb shell 'cd /data/local/tmp/odbt && LD_LIBRARY_PATH=. \
            OPENDAQ_BT_MODULE_DIR=/data/local/tmp/odbt ./bluetooth_module_loading_tests'
 adb shell 'cd /data/local/tmp/odbt && LD_LIBRARY_PATH=. ./bluetooth_module_tests'
@@ -189,8 +191,15 @@ exercised, but it has never seen a radio** — the bring-up host had no Bluetoot
 x64 has never been compiled.** Do not describe Windows scanning, connecting, GATT browsing or
 heart-rate streaming as working.
 
-**Android cross-compiles and loads (arm64-v8a, minSdk 26), but has not been tested with a radio.**
-The loading and unit suites pass on an emulator; all radio and permission paths remain unverified.
+**Android cross-compiles for arm64-v8a and armeabi-v7a (minSdk 26); arm64-v8a loads but has not
+been tested with a radio, and armeabi-v7a has never been executed at all.** On arm64-v8a the
+loading and unit suites pass both on an emulator and on a physical Pixel 8a (Android 17); all
+radio and permission paths remain unverified, since those runs have no `Context` and so never
+open an adapter.
+
+For armeabi-v7a only the build is verified -- it compiles, links, and produces a genuine 32-bit
+ARM `.so` with no text relocations -- because Apple Silicon has no AArch32 support and current
+arm64 emulator images carry no 32-bit userspace. Do not describe armeabi-v7a as tested.
 
 The CoreBluetooth backend keeps **one `PeripheralState` block per connected peripheral**, held by
 `shared_ptr` and registered in `SharedState::peripherals` under the peripheral's identifier; every
@@ -438,8 +447,54 @@ The following settings are required for a successful build.
   `DEFINE_MODULE_EXPORTS` defines `daq::daqSharedLibObjectCount` whose declaration sits behind
   that guard.
 - Preserve AGP's `CMAKE_LIBRARY_OUTPUT_DIRECTORY`; it is where AAR packaging looks for `.so` files.
+  This matters more with two ABIs: AGP hands a *different* one to each ABI's CMake invocation, and
+  overriding it would collapse both into a single directory. The top-level `CMakeLists.txt` guards
+  its own default with `if (NOT ANDROID OR NOT DEFINED ...)` for exactly this reason.
 - Tests and the CLI default to off on Android but remain switchable.
 - openDAQ v3.40.1 cross-compiles unpatched. minSdk 26 also satisfies mDNS's `getifaddrs` requirement.
+
+### Android on armeabi-v7a
+
+The AAR ships both `arm64-v8a` and `armeabi-v7a`; `-PabiFilters=<comma-separated>` narrows it while
+iterating, because each ABI is a full openDAQ + Boost cross-build. **No source or CMake change was
+needed for the 32-bit ABI** — which is worth recording, because several plausible 32-bit traps were
+checked and every one is already handled somewhere:
+
+- **Boost.Context selects the right assembly.** `openDAQBoostLibraryUtils.cmake` sets
+  `BOOST_CONTEXT_ARCHITECTURE` to `arm` (not `arm64`) and the ABI to `aapcs` when
+  `BUILD_ARM AND NOT BUILD_64Bit`, giving `{make,jump,ontop}_arm_aapcs_elf_gas.S`. `BUILD_ARM`
+  comes from `UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "^arm.*$"`, and the NDK sets
+  `CMAKE_SYSTEM_PROCESSOR=armv7-a`. This is the *same* mechanism that fails on Windows/ARM64 (see
+  below), and it works here only because the NDK derives the variable from the **target**, not the
+  host.
+- **Those `.S` files carry no `.arm` directive, and it does not matter.** They declare only
+  `.syntax unified`, while the NDK defaults `ANDROID_ARM_MODE` to `thumb`. That looks like a
+  silent runtime hazard — `make_fcontext` computes a return address with `adr`, and a `pop {pc}`
+  to an address with bit 0 clear switches to ARM state. It is not one: clang's integrated
+  assembler starts a `.S` file in ARM state regardless of `-mthumb`. Assembling all three under
+  `-mthumb` yields one `$a` mapping symbol per file, no `$t`, and 4-byte A32 encodings throughout;
+  the built `libboost_context.a` confirms it (the `$t` symbols in that archive are its C++
+  objects, which are Thumb as expected).
+  **Do not "fix" this by forcing `-DANDROID_ARM_MODE=arm`** — it is not broken.
+- **Position-independent code survives.** openDAQ gates PIC on `BUILD_64Bit OR BUILD_ARM`, and
+  `BUILD_ARM` carries it. Were it off, `native_streaming_protocol` would build non-PIC and
+  Android's linker rejects `DT_TEXTREL` outright.
+- **RapidJSON drops to its scalar path** (NEON is enabled only for a `CMAKE_SYSTEM_PROCESSOR`
+  of exactly `aarch64`), and `BUILD_ARM` still supplies `-Wno-error=type-limits` — precisely the
+  warning class 32-bit builds provoke.
+- **openDAQ renames its libraries by pointer width**, so `jni/armeabi-v7a/` holds
+  `libopendaq-32-3.so` where `jni/arm64-v8a/` holds `libopendaq-64-3.so`. Nothing resolves those
+  names by hand; they arrive through `DT_NEEDED`, and `ModuleManager` scans by extension.
+- **The JNI token type is load-bearing on 32-bit.** Tokens are `int64_t` registry keys, never
+  pointers cast to `jlong`, and they are passed into `J` slots of variadic `CallStatic*Method`
+  calls. AAPCS 8-byte-aligns 64-bit varargs on armv7, so passing an `int` there would shift every
+  following argument — a corruption that arm64 and x86-64 happen to tolerate. Keep them `int64_t`.
+- **`std::atomic<int64_t>` needs no `-latomic`.** ARMv7-A has `ldrexd`/`strexd`, so clang inlines
+  it; the generated assembly contains no `__atomic_*` calls.
+- **`time_t` is 32 bits on armeabi-v7a even at API 26.** The channel domain epoch is anchored via
+  `system_clock::now()` in `profiles/channel_support.cpp`, and bionic truncates at that libc
+  boundary. All arithmetic above it is `int64_t` microseconds, so nothing here overflows before
+  2038 — but the anchor itself is a Y2038 value on this ABI.
 
 ### Windows on ARM64
 
