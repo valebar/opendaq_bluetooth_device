@@ -61,13 +61,27 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-option(OPENDAQ_BT_USE_SYSTEM_SDK "Use a pre-installed openDAQ SDK instead of fetching it" OFF)
-option(OPENDAQ_BT_BUILD_TESTS    "Build unit tests"                                       ON)
-option(OPENDAQ_BT_BUILD_APP      "Build the bt_cli smoke-test application"                ON)
+# AAR builds need only the module; tests can still be enabled for adb runs.
+if (ANDROID)
+    set(OPENDAQ_BT_DEFAULT_BUILD_TESTS OFF)
+    set(OPENDAQ_BT_DEFAULT_BUILD_APP OFF)
+else()
+    set(OPENDAQ_BT_DEFAULT_BUILD_TESTS ON)
+    set(OPENDAQ_BT_DEFAULT_BUILD_APP ON)
+endif()
 
-# Everything lands in one directory so the openDAQ ModuleManager can be pointed at it.
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+option(OPENDAQ_BT_USE_SYSTEM_SDK "Use a pre-installed openDAQ SDK instead of fetching it" OFF)
+option(OPENDAQ_BT_BUILD_TESTS    "Build unit tests"                        ${OPENDAQ_BT_DEFAULT_BUILD_TESTS})
+option(OPENDAQ_BT_BUILD_APP      "Build the bt_cli smoke-test application" ${OPENDAQ_BT_DEFAULT_BUILD_APP})
+
+# Keep host outputs together. AGP supplies Android output directories used for AAR packaging.
+if (NOT ANDROID OR NOT DEFINED CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+if (NOT ANDROID OR NOT DEFINED CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 
 include(CommonUtils)
 

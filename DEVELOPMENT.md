@@ -39,6 +39,30 @@ env OPENDAQ_CONFIG_Modules_BluetoothModule_FilterByKnownProfiles=false ./build/b
 Useful CMake options: `OPENDAQ_BT_USE_SYSTEM_SDK` (use an installed SDK rather than FetchContent),
 `OPENDAQ_BT_BUILD_TESTS`, `OPENDAQ_BT_BUILD_APP`.
 
+The Android AAR is a separate Gradle project under `android/`; the root remains a CMake project.
+There is no committed Gradle wrapper.
+
+```bash
+# AAR: android/build/outputs/aar/opendaq-bluetooth-release.aar
+cd android && gradle assembleRelease
+cd android && gradle connectedDebugAndroidTest   # needs a device or emulator
+
+# Cross-compile tests for adb
+cmake -S . -B build-android -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
+      -DCMAKE_BUILD_TYPE=Release -DOPENDAQ_BT_BUILD_TESTS=ON
+cmake --build build-android -j "$(nproc)"
+
+llvm-strip --strip-unneeded build-android/bin/*.so build-android/bin/bluetooth_module_*tests
+adb push build-android/bin /data/local/tmp/odbt
+adb shell 'cd /data/local/tmp/odbt && LD_LIBRARY_PATH=. \
+           OPENDAQ_BT_MODULE_DIR=/data/local/tmp/odbt ./bluetooth_module_loading_tests'
+adb shell 'cd /data/local/tmp/odbt && LD_LIBRARY_PATH=. ./bluetooth_module_tests'
+```
+
+`OPENDAQ_BT_MODULE_DIR` overrides the host path compiled into the loading test.
+
 ## Signals and profiles
 
 A GATT service the module understands becomes an openDAQ **channel** under the device's IO folder.
@@ -149,6 +173,7 @@ BLE backends      ble_central_bluez.cpp          (Linux, sd-bus / org.bluez)
 (no openDAQ headers)
                   ble_central_winrt.cpp          (Windows, C++/WinRT)
                   ble_central_corebluetooth.mm   (macOS, Objective-C++)
+                  ble_central_android.cpp        (Android, JNI + android/src/main/java shim)
                   tests/fake_ble_central.h       (scripted, used by every unit test)
 ```
 
@@ -163,6 +188,9 @@ unexercised there.** **Windows compiles, links and loads (ARM64/MSVC) and its di
 exercised, but it has never seen a radio** — the bring-up host had no Bluetooth adapter — **and
 x64 has never been compiled.** Do not describe Windows scanning, connecting, GATT browsing or
 heart-rate streaming as working.
+
+**Android cross-compiles and loads (arm64-v8a, minSdk 26), but has not been tested with a radio.**
+The loading and unit suites pass on an emulator; all radio and permission paths remain unverified.
 
 The CoreBluetooth backend keeps **one `PeripheralState` block per connected peripheral**, held by
 `shared_ptr` and registered in `SharedState::peripherals` under the peripheral's identifier; every
@@ -191,6 +219,11 @@ stalls the message pump). Two rules follow, both easy to undo by accident:
   `BleError` at the single `Apartment::run()` choke point. Without that, a WinRT failure sails past
   every `catch (const std::exception&)` above the backend — including the one in
   `HeartRateChannel`'s destructor, where it means `std::terminate()`.
+
+Android needs a Java shim because Bluetooth is not exposed by the NDK. `OpenDaqBluetooth` is the
+entry point, while `ScanBridge` and `GattBridge` forward platform calls and callbacks. Policy and
+timeouts stay in `ble_central_android.cpp`. Callbacks use integer tokens backed by weak registries,
+so late callbacks cannot dereference destroyed C++ objects.
 
 `enable_language(OBJCXX)` for the macOS backend lives in the **top-level** `CMakeLists.txt`, not
 in `opendaq_bt_add_ble_backend()`. CMake only accepts `enable_language()` at file scope: called
@@ -374,6 +407,17 @@ dialect settings are also separate from `CMAKE_CXX_*` and are set alongside it.
   `createPlatformCentral()` to throw, so any accidental use of the production path fails loudly
   instead of touching a radio. `bluetooth_module_loading_tests` uses a separate main for this
   reason.
+- Serialize Android GATT operations per connection.
+- Keep `JNI_OnLoad` optional: `ModuleManager` uses `dlopen`, so initialization must also capture the
+  VM and export normal `Java_...` symbols.
+- Cache application classes during `OpenDaqBluetooth.initialize()`; attached native threads cannot
+  resolve them with `FindClass`.
+- An uninitialized bridge must report unavailable, not prevent the module from loading.
+- Notifications require both local enablement and a CCCD write.
+- Keep both pre-33 and API 33 read/notification callback overloads.
+- Keep scans idempotent to avoid Android's scan-start quota.
+- Close every `BluetoothGatt`, including failed handshakes and delayed cleanup after permission loss.
+- Handles include service and characteristic instance IDs.
 
 ### Build constraints imposed by the SDK
 
@@ -393,6 +437,9 @@ The following settings are required for a successful build.
 - `src/module_dll.cpp` alone is compiled with `OPENDAQ_TRACK_SHARED_LIB_OBJECT_COUNT`, because
   `DEFINE_MODULE_EXPORTS` defines `daq::daqSharedLibObjectCount` whose declaration sits behind
   that guard.
+- Preserve AGP's `CMAKE_LIBRARY_OUTPUT_DIRECTORY`; it is where AAR packaging looks for `.so` files.
+- Tests and the CLI default to off on Android but remain switchable.
+- openDAQ v3.40.1 cross-compiles unpatched. minSdk 26 also satisfies mDNS's `getifaddrs` requirement.
 
 ### Windows on ARM64
 
@@ -467,6 +514,8 @@ covered by unit tests over the full flag matrix of each wire format and share al
 and signal machinery heart rate exercises, but no trainer, power meter or cadence sensor has been
 on the other end, and trainer control depends on the characteristic-write path documented above as
 unexercised on macOS. They should not be described as verified.
+
+Android ships an AAR, not an application. The consuming app requests runtime permissions.
 
 Deliberately **not** implemented: profiles beyond those four; the Fitness Machine service for
 treadmills, rowers, cross trainers and stair climbers, whose data characteristics are named in

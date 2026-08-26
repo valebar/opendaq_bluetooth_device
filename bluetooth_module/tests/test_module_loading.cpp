@@ -9,6 +9,7 @@
 
 #include <opendaq/opendaq.h>
 
+#include <cstdlib>
 #include <string>
 
 using namespace daq;
@@ -18,7 +19,13 @@ namespace
 
 InstancePtr createInstanceFromBuildOutput()
 {
-    // OPENDAQ_BT_MODULE_DIR is the directory the module target writes into, injected by CMake.
+    // Cross-compiled tests can override the host build path when run through adb.
+    if (const char* const configured = std::getenv("OPENDAQ_BT_MODULE_DIR"))
+    {
+        if (*configured != '\0')
+            return InstanceBuilder().addModulePath(configured).build();
+    }
+
     return InstanceBuilder().addModulePath(OPENDAQ_BT_MODULE_DIR).build();
 }
 

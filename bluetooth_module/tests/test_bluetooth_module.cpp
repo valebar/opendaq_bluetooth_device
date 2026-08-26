@@ -271,6 +271,22 @@ TEST(BluetoothModule, StillHidesAConnectedPeripheralWithNoProfileTheModuleUnders
     EXPECT_EQ(module.getAvailableDevices().getCount(), 0u);
 }
 
+TEST(BluetoothModule, ListsAConnectedPeripheralWhoseServicesCannotBeQueried)
+{
+    FakeCentral* central = nullptr;
+    const auto module = createModule(central);
+
+    ble::Advertisement connected;
+    connected.id = "02:00:00:00:00:03";
+    connected.connected = true;
+    connected.lastSeen = std::chrono::steady_clock::now();
+    central->addAdvertisement(connected);
+
+    const auto devices = module.getAvailableDevices();
+    ASSERT_EQ(devices.getCount(), 1u);
+    EXPECT_EQ(devices[0].getConnectionString(), "bluetooth://02:00:00:00:00:03");
+}
+
 TEST(BluetoothModule, ListsAConnectedPeripheralWithNoKnownProfileWhenTheFilterIsOff)
 {
     FakeCentral* central = nullptr;

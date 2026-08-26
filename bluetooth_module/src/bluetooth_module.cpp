@@ -243,13 +243,11 @@ ListPtr<IDeviceInfo> BluetoothModule::onGetAvailableDevices()
 
     for (const auto& advertisement : discovered)
     {
-        // Strict on purpose: an advertisement with no service UUIDs is hidden too. Plenty of
-        // peripherals advertise only a name and manufacturer data and reveal their services only
-        // once connected, so this does hide some devices that would in fact work -- they remain
-        // reachable by connection string, which the filter does not touch. The alternative,
-        // treating an empty list as "unknown, so show it", puts most of the room back on the list
-        // and defeats the point.
-        if (filterByKnownProfiles && !advertisesKnownGattProfile(advertisement))
+        // Connected devices may stop advertising before their services can be inspected.
+        const auto connectedWithUnknownServices =
+            advertisement.connected && advertisement.serviceUuids.empty();
+        if (filterByKnownProfiles && !connectedWithUnknownServices
+            && !advertisesKnownGattProfile(advertisement))
             continue;
 
         devices.pushBack(createDeviceInfo(advertisement));
