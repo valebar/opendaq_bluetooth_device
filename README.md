@@ -206,6 +206,7 @@ change to the device, the discovery path or the backends.
 | Linux | BlueZ over D-Bus (sd-bus) | **Built and verified against real hardware** |
 | Windows | C++/WinRT | **Compiles and loads (ARM64, MSVC)** — not yet run against a radio, see below |
 | macOS | CoreBluetooth (Objective-C++) | **Built and verified against real hardware** (arm64, macOS 15) |
+| iOS | CoreBluetooth (Objective-C++) — the same backend source as macOS | **Cross-compiles for device arm64 and simulator arm64 (iOS 15+, Xcode 26)**; never loaded into an application, never run against a radio, see below |
 | Android | JNI over `android.bluetooth` | **Cross-compiles for arm64-v8a and armeabi-v7a (NDK 27+)**; arm64-v8a loads and passes its suites on a physical device, armeabi-v7a has never been executed — never run against a radio, see below |
 
 On macOS, discovery, connecting, GATT resolution, characteristic reads and heart-rate notification
@@ -274,6 +275,24 @@ The two ABIs are **not** equally verified, and the difference matters:
   support.
 
 **Radio-dependent behavior and permission flows remain unverified on Android**, on either ABI.
+
+iOS reuses the macOS backend **unchanged**. `ble_central_corebluetooth.mm` is one translation unit
+serving both Apple platforms, and the only conditionals in it are two reason strings, the
+Info.plist pre-flight and the suppressed power alert. What iOS needed was a build system, packaging and a permissions story — not a second
+backend.
+
+The module cross-compiles for `arm64` against the device and simulator SDKs and ships as four
+XCFrameworks (see *Build for iOS*). openDAQ v3.40.1 and Boost 1.82 cross-compile unpatched, but
+only once `CMAKE_SYSTEM_PROCESSOR` is supplied: CMake leaves it empty for an Apple cross-build, and
+without it Boost.Context configures itself to assemble x86-64 for an arm64 target. The top-level
+`CMakeLists.txt` derives it from `CMAKE_OSX_ARCHITECTURES`.
+
+**Nothing about iOS has been run.** The build script checks that each library is `arm64`, targets
+the right platform at the right minimum version, carries an `@rpath` install name, resolves its
+siblings through `@loader_path` and exports the module entry points — but no application has
+embedded them, no `dlopen` has been attempted, and no radio has been involved. The Simulator cannot
+close that gap: it has no Bluetooth hardware at all, and `isAvailable()` reports
+`CBManagerStateUnsupported` there by design.
 
 ## Build the openDAQ Bluetooth module
 
@@ -358,6 +377,58 @@ Running the `armeabi-v7a` binaries needs a physical device with 32-bit userspace
 Silicon cannot execute them at all, and current arm64 emulator images ship no 32-bit runtime.
 
 Use `llvm-strip --strip-unneeded` before pushing large debug builds.
+
+### Build for iOS
+
+iOS produces four **XCFrameworks**, because four dynamic libraries have to reach the application:
+the module and the three openDAQ cores it links against. `xcodebuild -create-xcframework` holds
+many slices of one library per bundle, and openDAQ builds its cores as shared libraries with no
+static option, so there is nothing to collapse into fewer.
+
+Requires Xcode 15+ (developed against Xcode 26.6 and the iOS 26.5 SDK), CMake ≥ 3.24, Ninja, and
+`mono` on `PATH` — openDAQ runs RTGen, a .NET code generator, on the host even when
+cross-compiling.
+
+```bash
+ios/build-xcframeworks.sh
+```
+
+The bundles land in `ios/xcframeworks/`, each carrying an `ios-arm64` and an `ios-arm64-simulator`
+slice, alongside an `ios/Package.swift` that vends all four as one Swift package product.
+
+**Each SDK is a full openDAQ + Boost cross-build**, so building both takes roughly twice as long as
+one. Narrow it while iterating:
+
+```bash
+ios/build-xcframeworks.sh --sdks=iphoneos
+```
+
+`--opendaq-source-dir=` and `--boost-source-dir=` reuse local sources instead of fetching them, and
+are the exact counterparts of Gradle's `-PopendaqSourceDir` and `-PboostSourceDir`: both trees are
+read-only to the build and safe to share across slices, while each slice still gets its own build
+directory. `--help` lists the rest.
+
+To drive CMake directly — one build directory per SDK, because a cache cannot be re-pointed at
+another sysroot:
+
+```bash
+cmake -S . -B build-ios-iphoneos -G Ninja \
+      -DCMAKE_SYSTEM_NAME=iOS \
+      -DCMAKE_OSX_SYSROOT=iphoneos \
+      -DCMAKE_OSX_ARCHITECTURES=arm64 \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+      -DCMAKE_BUILD_TYPE=Release
+cmake --build build-ios-iphoneos --target bluetooth_module -j "$(sysctl -n hw.ncpu)"
+```
+
+Pass `-DCMAKE_OSX_SYSROOT=iphonesimulator` for the simulator slice; CMake defaults to `iphoneos`.
+Name exactly one architecture per build directory — the top-level `CMakeLists.txt` rejects a fat
+`CMAKE_OSX_ARCHITECTURES`, because it derives `CMAKE_SYSTEM_PROCESSOR` from it and a fat build has
+no single answer to give. See *iOS* in `DEVELOPMENT.md` for why that variable has to be derived at
+all.
+
+Tests and the CLI default to off on iOS and cannot usefully be turned on: nothing in `bin/` can be
+executed, and CMake forces every iOS executable into a `.app` bundle.
 
 ## Bluetooth connection strings
 
@@ -583,10 +654,70 @@ when prompted. A bare unbundled command-line binary is typically denied, often s
 backend reports this as an authorisation failure rather than as "no devices".
 
 CoreBluetooth's `retrieveConnectedPeripheralsWithServices:` takes a non-empty service array and has
-no "everything" form, so on macOS a peripheral connected to the host is reported only when it hosts
-a service this module has a profile for, even with `FilterByKnownProfiles` off. Linux and Windows
-report every connected peripheral and filter afterwards. Reporting connected peripherals at all is
-verified on Linux only; the Windows and macOS paths compile but have not run against a radio.
+no "everything" form, so on macOS and iOS a peripheral connected to the host is reported only when
+it hosts a service this module has a profile for, even with `FilterByKnownProfiles` off. Linux and
+Windows report every connected peripheral and filter afterwards. Reporting connected peripherals at
+all is verified on Linux only; the Windows, macOS and iOS paths compile but have not run against a
+radio.
+
+**iOS.** Consume the XCFrameworks by adding `ios/` as a local Swift package, or by dragging all
+four bundles into the application target's *Frameworks, Libraries, and Embedded Content* with
+**Embed & Sign**. All four must be embedded: the application never references the module
+symbolically — openDAQ `dlopen`s it — so leaving it out is an easy mistake, and it surfaces only as
+an empty device list.
+
+Then, before building the `Instance`:
+
+```objc
+// Objective-C++: openDAQ's headers are C++ and cannot be imported into Swift.
+NSString* modules = NSBundle.mainBundle.privateFrameworksPath;   // App.app/Frameworks
+InstancePtr instance = InstanceBuilder()
+    .addModulePath(modules.UTF8String)
+    .build();
+```
+
+The module path must be explicit for the same reason it must be on Android: openDAQ's default is
+the executable's own directory, which on iOS is `App.app` — one level above `Frameworks/`.
+
+The application's `Info.plist` must declare **`NSBluetoothAlwaysUsageDescription`**, and this is
+not the advisory requirement it is on macOS: iOS *terminates* an application that touches Bluetooth
+without it. Since the module builds its `CBCentralManager` while `ModuleManager` is loading it,
+that termination would strike inside `InstanceBuilder().build()` — so on iOS the backend
+pre-flights the key and reports an ordinary unavailability reason instead of letting the
+application die. `NSBluetoothPeripheralUsageDescription` is an iOS 12-and-earlier key and is not
+needed at a 15.0 floor.
+
+**The permission alert therefore appears when the `Instance` is built**, not at the first scan.
+Build the instance at a moment the application is ready to explain itself. Unlike macOS, the
+backend also passes `CBCentralManagerOptionShowPowerAlertKey: NO`: a module loaded into someone
+else's application should not raise a modal "Turn On Bluetooth" alert during instance construction.
+`isAvailable()` reports "Bluetooth is turned off" and the application can prompt when it chooses.
+
+`getAvailableDevices()` additionally runs openDAQ's own mDNS device discovery, which has nothing to
+do with Bluetooth but is what iOS calls local networking. Without `NSLocalNetworkUsageDescription`,
+`NSBonjourServices` and Apple's request-only `com.apple.developer.networking.multicast` entitlement
+those queries find nothing. Bluetooth discovery is unaffected.
+
+**Discovery is foreground-only.** The module scans with a `nil` service filter, because that is
+what lets one module discover every profile it supports — and iOS delivers nothing from a `nil`
+filter while the application is backgrounded, whatever `UIBackgroundModes` says. An *established*
+connection and its notifications do survive backgrounding if the application declares the
+`bluetooth-central` background mode. `CBCentralManagerScanOptionAllowDuplicatesKey` is likewise
+ignored in the background; in the foreground it is a real battery cost, and it is on so that `Rssi`
+stays current. Call `stopScan()`, or drop the device, when no scan UI is showing.
+
+**Do not call `getAvailableDevices()` on the main thread.** `isAvailable()` waits up to three
+seconds for the manager to reach `CBManagerStatePoweredOn` — on a first launch that window spans
+the permission alert — and `ScanCache` blocks its first snapshot for `ScanWarmupMs`, 2000 ms by
+default. Five seconds of frozen UI in the worst case. `ScanWarmupMs` is a module option; the
+three-second manager wait is not currently configurable.
+
+Peripheral identifiers are per-*device* `NSUUID`s, exactly as on macOS, so a connection string
+copied from a Mac is not valid on an iPhone.
+
+**The Simulator has no Bluetooth radio.** `isAvailable()` reports that the device does not support
+Bluetooth Low Energy, which is correct rather than a fault. Reaching that message is still a useful
+signal: it proves the dylibs embedded, `dlopen` succeeded and the module loaded.
 
 **Android.** Consume the AAR, then, before building the openDAQ `Instance`:
 

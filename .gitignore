@@ -16,3 +16,9 @@ build-android*/
 gradlew
 gradlew.bat
 **/gradle/wrapper/
+
+# iOS build output and Swift package artefacts. build-ios*/ mirrors build-android*/.
+build-ios*/
+ios/xcframeworks/
+ios/.build/
+ios/Package.resolved

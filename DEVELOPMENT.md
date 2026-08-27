@@ -65,6 +65,37 @@ adb shell 'cd /data/local/tmp/odbt && LD_LIBRARY_PATH=. ./bluetooth_module_tests
 
 `OPENDAQ_BT_MODULE_DIR` overrides the host path compiled into the loading test.
 
+The iOS XCFrameworks are a separate packaging directory under `ios/`, exactly as `android/` is for
+the AAR; the root remains a CMake project. Needs `mono` on `PATH` -- openDAQ runs RTGen, a .NET
+code generator, on the host even when cross-compiling.
+
+```bash
+# Four XCFrameworks into ios/xcframeworks/, each with an ios-arm64 and an ios-arm64-simulator slice
+ios/build-xcframeworks.sh
+ios/build-xcframeworks.sh --sdks=iphoneos            # one SDK, ~half the build
+ios/build-xcframeworks.sh --opendaq-source-dir=... --boost-source-dir=...   # reuse local sources
+
+# Driving CMake directly. One build dir per SDK -- a cache cannot be re-pointed at another sysroot,
+# and exactly one architecture per dir, because CMAKE_SYSTEM_PROCESSOR is derived from it.
+cmake -S . -B build-ios-iphoneos -G Ninja \
+      -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
+      -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+      -DCMAKE_BUILD_TYPE=Release
+cmake --build build-ios-iphoneos --target bluetooth_module -j "$(sysctl -n hw.ncpu)"
+
+# What to assert about the output. build-xcframeworks.sh runs all of this and exits non-zero on
+# any of it, so these are for hand-built slices and for diagnosing a failure it reports.
+lipo -info      build-ios-iphoneos/bin/libbluetooth_module.module.dylib   # arm64
+xcrun vtool -show-build build-ios-iphoneos/bin/libbluetooth_module.module.dylib  # IOS, minos 15.0
+otool -D        build-ios-iphoneos/bin/libbluetooth_module.module.dylib   # @rpath/<same name>
+otool -l        build-ios-iphoneos/bin/libbluetooth_module.module.dylib | grep -A2 LC_RPATH
+otool -L        build-ios-iphoneos/bin/libbluetooth_module.module.dylib   # CoreBluetooth, @rpath
+nm -gU          build-ios-iphoneos/bin/libbluetooth_module.module.dylib | grep -v ' __Z'
+plutil -extract AvailableLibraries.0.LibraryPath raw \
+                ios/xcframeworks/OpenDAQBluetoothModule.xcframework/Info.plist
+cd ios && swift package dump-package
+```
+
 ## Signals and profiles
 
 A GATT service the module understands becomes an openDAQ **channel** under the device's IO folder.
@@ -174,7 +205,7 @@ openDAQ layer     BluetoothModule ─owns─> ScanCache ─drives─> ICentral
 BLE backends      ble_central_bluez.cpp          (Linux, sd-bus / org.bluez)
 (no openDAQ headers)
                   ble_central_winrt.cpp          (Windows, C++/WinRT)
-                  ble_central_corebluetooth.mm   (macOS, Objective-C++)
+                  ble_central_corebluetooth.mm   (macOS and iOS, Objective-C++)
                   ble_central_android.cpp        (Android, JNI + android/src/main/java shim)
                   tests/fake_ble_central.h       (scripted, used by every unit test)
 ```
@@ -190,6 +221,11 @@ unexercised there.** **Windows compiles, links and loads (ARM64/MSVC) and its di
 exercised, but it has never seen a radio** — the bring-up host had no Bluetooth adapter — **and
 x64 has never been compiled.** Do not describe Windows scanning, connecting, GATT browsing or
 heart-rate streaming as working.
+
+**iOS shares the macOS backend and has never been run at all** -- it cross-compiles for device and
+simulator arm64 (iOS 15+) and its binaries are checked for architecture, platform, install name,
+runpath and module exports, but nothing has embedded them, loaded them or put a radio behind them.
+The Simulator cannot help: it has no Bluetooth hardware.
 
 **Android cross-compiles for arm64-v8a and armeabi-v7a (minSdk 26); arm64-v8a loads but has not
 been tested with a radio, and armeabi-v7a has never been executed at all.** On arm64-v8a the
@@ -234,7 +270,7 @@ entry point, while `ScanBridge` and `GattBridge` forward platform calls and call
 timeouts stay in `ble_central_android.cpp`. Callbacks use integer tokens backed by weak registries,
 so late callbacks cannot dereference destroyed C++ objects.
 
-`enable_language(OBJCXX)` for the macOS backend lives in the **top-level** `CMakeLists.txt`, not
+`enable_language(OBJCXX)` for the Apple backend lives in the **top-level** `CMakeLists.txt`, not
 in `opendaq_bt_add_ble_backend()`. CMake only accepts `enable_language()` at file scope: called
 from a function it loads the language's rule variables into that function's scope, where they are
 discarded on return. Only the `CMAKE_OBJCXX_COMPILER` cache entry survives, so configuration
@@ -427,6 +463,15 @@ dialect settings are also separate from `CMAKE_CXX_*` and are set alongside it.
 - Keep scans idempotent to avoid Android's scan-start quota.
 - Close every `BluetoothGatt`, including failed handshakes and delayed cleanup after permission loss.
 - Handles include service and characteristic instance IDs.
+- **One CoreBluetooth translation unit serves macOS and iOS.** There is no iOS backend file. The
+  only conditionals in `ble_central_corebluetooth.mm` are `TARGET_OS_IPHONE` around two reason
+  strings, the Info.plist pre-flight and the suppressed power alert; the rest is identical because
+  CoreBluetooth is.
+- **On iOS a missing `NSBluetoothAlwaysUsageDescription` kills the host application**, where macOS
+  merely reports `CBManagerStateUnauthorized`. The manager is built while `ModuleManager` loads the
+  module, so the death would land inside `InstanceBuilder().build()` — which is why the constructor
+  pre-flights the key and refuses to create a manager rather than letting a misconfigured
+  application die inside us.
 
 ### Build constraints imposed by the SDK
 
@@ -446,12 +491,21 @@ The following settings are required for a successful build.
 - `src/module_dll.cpp` alone is compiled with `OPENDAQ_TRACK_SHARED_LIB_OBJECT_COUNT`, because
   `DEFINE_MODULE_EXPORTS` defines `daq::daqSharedLibObjectCount` whose declaration sits behind
   that guard.
+- **`CMAKE_SYSTEM_PROCESSOR` has to be supplied for iOS.** CMake leaves it empty for an Apple
+  cross-build, and openDAQ derives `BUILD_ARM` from it. The top-level `CMakeLists.txt` sets it from
+  `CMAKE_OSX_ARCHITECTURES`; see *iOS* below for what breaks without it.
+- **`mono` is a host requirement on every non-Windows build, cross-compiles included.** openDAQ's
+  `find_program(MONO_C NAMES "mono" REQUIRED)` gates RTGen, a .NET code generator that runs on the
+  host regardless of the target.
 - Preserve AGP's `CMAKE_LIBRARY_OUTPUT_DIRECTORY`; it is where AAR packaging looks for `.so` files.
   This matters more with two ABIs: AGP hands a *different* one to each ABI's CMake invocation, and
   overriding it would collapse both into a single directory. The top-level `CMakeLists.txt` guards
   its own default with `if (NOT ANDROID OR NOT DEFINED ...)` for exactly this reason.
-- Tests and the CLI default to off on Android but remain switchable.
-- openDAQ v3.40.1 cross-compiles unpatched. minSdk 26 also satisfies mDNS's `getifaddrs` requirement.
+- Tests and the CLI default to off on Android and iOS, but remain switchable. On iOS there is no
+  point switching them on: CMake forces `CMAKE_MACOSX_BUNDLE`, so every executable becomes a `.app`
+  that cannot be run from the build tree anyway.
+- openDAQ v3.40.1 cross-compiles unpatched for Android and for iOS. minSdk 26 also satisfies mDNS's
+  `getifaddrs` requirement.
 
 ### Android on armeabi-v7a
 
@@ -495,6 +549,94 @@ checked and every one is already handled somewhere:
   `system_clock::now()` in `profiles/channel_support.cpp`, and bionic truncates at that libc
   boundary. All arithmetic above it is `int64_t` microseconds, so nothing here overflows before
   2038 — but the anchor itself is a Y2038 value on this ABI.
+
+### iOS
+
+iOS needed no new backend: `ble_central_corebluetooth.mm` serves both Apple platforms, and the only
+conditionals in it are two reason strings, the Info.plist pre-flight and the suppressed power alert. Everything else was build system and
+packaging, and two findings there are worth keeping.
+
+**The third `CMAKE_SYSTEM_PROCESSOR` trap, and the strangest one.** On Android the NDK sets the
+variable from the *target* and everything works. On Windows/ARM64 it names the emulated *host* and
+has to be corrected (below). On iOS it is not set **at all**: `CMakeDetermineSystem.cmake` reasons
+that "CMAKE_SYSTEM_NAME was set by a toolchain file or on the command line. Assume it set
+CMAKE_SYSTEM_VERSION and CMAKE_SYSTEM_PROCESSOR too" -- and there is no iOS toolchain file here to
+have done so, because CMake supports iOS natively. So it is the empty string, and the architecture
+lives in `CMAKE_OSX_ARCHITECTURES` where nothing thinks to look.
+
+Two layers then fail in sequence. openDAQ's `BUILD_ARM` is
+`UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "^arm.*$"`, so it never fires, so openDAQ never sets
+`BOOST_CONTEXT_ARCHITECTURE`/`_ABI`. Boost 1.82's own fallback then has only `CMAKE_SIZEOF_VOID_P`
+to go on and settles on `x86_64` with the `sysv` ABI -- feeding `{make,jump,ontop}_x86_64_sysv_macho_gas.S`
+to a clang targeting arm64. Deriving the variable from `CMAKE_OSX_ARCHITECTURES` fixes both layers
+at once, which is why the top-level `CMakeLists.txt` also rejects a fat `CMAKE_OSX_ARCHITECTURES`:
+there would be no single answer to give. `BOOST_CONTEXT_BINARY_FORMAT` needs nothing -- Boost keys
+that on `APPLE`, which CMake does set for iOS.
+
+Symptom if it regresses: Boost.Context fails to assemble, with x86 mnemonics in the error.
+
+**The runpath.** All four dylibs already carry `@rpath` install names, but none carried a runpath
+worth shipping: CMake's build-tree default is the absolute build directory, and openDAQ sets no
+runpath on its own targets at all (`libdaqcoretypes` had no `LC_RPATH` whatsoever). Since all four
+are embedded side by side in `App.app/Frameworks`, `@loader_path` is the whole answer.
+
+It is set once, at root scope, before `add_subdirectory(external)`, as `CMAKE_INSTALL_RPATH` plus
+`CMAKE_BUILD_WITH_INSTALL_RPATH`. Three reasons that beats the alternatives:
+
+- It covers openDAQ's three dylibs too. The SDK guards its own default with
+  `if (NOT DEFINED CMAKE_INSTALL_RPATH)` precisely so a consumer can override it.
+- `BUILD_RPATH` on our target alone would be **additive** -- CMake still appends the computed
+  build-tree entry, so a shipped binary would carry a path from the build machine.
+- `install_name_tool -add_rpath` afterwards would work, but it invalidates the ad-hoc signature the
+  linker applies to arm64 Mach-O, so it drags in a `codesign -f -s -` pass and an ordering rule
+  nobody will remember. Getting it right at link time avoids the whole class of problem.
+
+It is scoped to iOS: macOS binaries are verified as they stand and are run from the build tree,
+where the absolute runpath CMake computes is the one that works.
+
+**Why four XCFrameworks.** `xcodebuild -create-xcframework` holds many slices of *one* library per
+bundle, and four dynamic libraries have to reach the application -- openDAQ's cores are hard-coded
+`SHARED` with no static option. Bundling them as nested dylibs inside a single framework was
+considered and rejected: a framework's binary must be named after the bundle, so the module would
+lose the `.module.dylib` basename that `ModuleManager` scans for, and nested Mach-O inside a
+framework is not signed as nested code.
+
+That basename is load-bearing from `set_target_properties(... SUFFIX ...)` all the way to
+`ends_with()` in openDAQ's `module_manager_impl.cpp`. `create-xcframework` preserves it -- the
+build script asserts as much with `plutil -extract AvailableLibraries.N.LibraryPath` -- but it is
+the first thing to check if a module stops being found.
+
+**Checked, and fine, so nobody re-derives it:** `find_library(CoreBluetooth REQUIRED)` needs no
+conditional, because `Platform/Darwin.cmake` re-roots library searches into the active SDK (it
+resolves to `iPhoneOS.sdk` and cannot pick up the macOS framework). `find_program` is *not*
+re-rooted, so the host `mono` is still found. openDAQ's three `__APPLE__` branches
+(`path_tool.cpp`, `module_manager_impl.cpp`, `mdnsdiscovery_server.cpp`) are all correct on iOS
+unmodified. `try_compile` links a real executable and needs no signing identity, because ld64
+ad-hoc signs arm64 Mach-O -- do **not** pre-emptively set
+`CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY`, which would break the SDK's `CheckLinkerFlag` and
+`FindThreads` probes. Bitcode is dead since Xcode 14 and is not a consideration.
+
+**Deliberately not changed in the backend**, and each for a reason that outlives the temptation:
+
+- **`scanForPeripheralsWithServices:nil` stays.** iOS delivers nothing from a `nil` filter while
+  backgrounded, and passing the profile UUIDs would look like a fix. It is not one: a `nil` filter
+  is what lets one module discover every profile it supports, `FilterByKnownProfiles=false` depends
+  on it, and `setServicesOfInterest()` may not have been populated when `ScanCache` first calls
+  `startScan()` -- so the behaviour would become call-order dependent. A documented limitation
+  beats an order-dependent one.
+- **`CBCentralManagerScanOptionAllowDuplicatesKey: @YES` stays.** It is ignored in the background
+  and costs battery in the foreground, but it is what keeps `Rssi` current, and clients are told to
+  sort on that property. Scan lifetime is the host application's to control.
+- **The 3 s `waitForPoweredOn` and the 2 s `ScanWarmupMs` stay.** Together they are up to five
+  seconds on the calling thread, which is a frozen UI on iOS rather than a watchdog kill. The fix
+  is a documented contract -- never call `getAvailableDevices()` on the main thread -- which is
+  right on macOS and Android too. `ScanWarmupMs` is already a module option; if the manager wait
+  ever needs one, add `ManagerReadyTimeoutMs` next to it rather than shortening the default.
+
+**Unverified.** Whether SwiftPM auto-embeds *dylib*-bearing binary targets into `App.app/Frameworks`
+is well attested but not documented by Apple, so the README gives manual Embed & Sign as the
+fallback. Everything past `dlopen` -- discovery, connection, GATT, notifications -- is unverified
+too, and the platform-support table must keep saying so until an iPhone has actually run it.
 
 ### Windows on ARM64
 

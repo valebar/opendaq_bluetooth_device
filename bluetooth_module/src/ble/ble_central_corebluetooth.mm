@@ -1,9 +1,14 @@
-// BLE backend for macOS, built on CoreBluetooth.
+// BLE backend for Apple platforms, built on CoreBluetooth. One translation unit serves macOS and
+// iOS: the framework, the delegate protocol and the manager's own dispatch queue are identical on
+// both, and everything that differs is confined to the TARGET_OS_IPHONE branches below.
 //
 // VERIFIED: this translation unit compiles clean on Apple clang (arm64, macOS 15), and scanning,
 // connecting, GATT resolution, characteristic reads and notification delivery have all been run
-// against a live peripheral. Characteristic writes, and two peripherals connected at once, are
-// implemented but have not yet been exercised against real hardware.
+// against a live peripheral on macOS. Characteristic writes, and two peripherals connected at
+// once, are implemented but have not yet been exercised against real hardware.
+//
+// iOS compiles and links but has NEVER been run against a radio, and cannot be in the Simulator:
+// the Simulator has no Bluetooth hardware at all and settles on CBManagerStateUnsupported.
 //
 // Four CoreBluetooth particulars shape the code:
 //
@@ -12,9 +17,13 @@
 //     application to be running a main run loop -- an unreasonable demand from a plugin.
 //  2. Peripherals are identified by an NSUUID that Apple generates per host. The hardware MAC is
 //     deliberately never exposed, which is why connection strings are documented as host-specific.
-//  3. Nothing works until the manager reports CBManagerStatePoweredOn, and on macOS 11+ the host
-//     application bundle must declare NSBluetoothAlwaysUsageDescription or the state settles on
-//     CBManagerStateUnauthorized instead.
+//  3. Nothing works until the manager reports CBManagerStatePoweredOn, and the host application
+//     bundle must declare NSBluetoothAlwaysUsageDescription. Omitting it does not cost the same on
+//     both platforms: macOS 11+ settles on CBManagerStateUnauthorized, which this backend reports
+//     as an ordinary reason, whereas iOS *terminates the host application* the moment
+//     CBCentralManager is constructed. That construction happens while openDAQ's ModuleManager is
+//     loading this module -- inside InstanceBuilder().build() -- so on iOS the constructor
+//     pre-flights the key rather than let a misconfigured application die inside us.
 //  4. One CBCentralManager and one delegate serve every peripheral, and the delegate methods are
 //     the only place the peripheral an event belongs to is known. Everything per-peripheral
 //     therefore lives in a PeripheralState block routed by identifier -- see the comment there.
@@ -23,6 +32,7 @@
 
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <Foundation/Foundation.h>
+#import <TargetConditionals.h>
 
 #include <chrono>
 #include <condition_variable>
@@ -571,36 +581,83 @@ public:
     CoreBluetoothCentral()
         : state(std::make_shared<SharedState>())
     {
+#if TARGET_OS_IPHONE
+        // iOS does not report a missing usage description, it kills the process that lacks one.
+        // This module is a plugin inside somebody else's application and the manager is built
+        // during InstanceBuilder().build(), so that termination would strike from inside our
+        // constructor. Refuse to build a manager instead, and let the ordinary isAvailable() path
+        // carry the explanation out to the caller.
+        if ([NSBundle.mainBundle objectForInfoDictionaryKey:@"NSBluetoothAlwaysUsageDescription"]
+            == nil)
+        {
+            unavailable = "this application's Info.plist does not declare "
+                          "NSBluetoothAlwaysUsageDescription. iOS terminates any application that "
+                          "touches Bluetooth without it, so no Bluetooth manager was created";
+            return;
+        }
+#endif
+
         queue = dispatch_queue_create("com.pawsm.opendaq.bluetooth", DISPATCH_QUEUE_SERIAL);
 
         delegate = [[OpenDaqBleDelegate alloc] init];
         delegate.state = state.get();
 
+        NSDictionary* options = nil;
+#if TARGET_OS_IPHONE
+        // With the radio switched off, CoreBluetooth's default is to raise a modal system alert
+        // asking the user to turn it on. Here that would appear during instance construction, at a
+        // moment the host application did not choose and may not be ready for. isAvailable()
+        // already reports "Bluetooth is turned off", so the prompt is the application's to make.
+        options = @{CBCentralManagerOptionShowPowerAlertKey: @NO};
+#endif
+
         // Our own queue, never nil: a nil queue would bind CoreBluetooth to the main run loop,
         // which a module loaded into an arbitrary host application cannot assume exists.
-        manager = [[CBCentralManager alloc] initWithDelegate:delegate queue:queue];
+        manager = [[CBCentralManager alloc] initWithDelegate:delegate
+                                                       queue:queue
+                                                     options:options];
     }
 
     ~CoreBluetoothCentral() override { stopScan(); }
 
     bool isAvailable(std::string& reason) override
     {
+        // Set only when the constructor declined to create a manager at all. Checked first because
+        // there is nothing to wait for in that case, and every other entry point on this class
+        // funnels through here before it touches the manager.
+        if (!unavailable.empty())
+        {
+            reason = unavailable;
+            return false;
+        }
+
         if (!waitForPoweredOn(seconds(3)))
         {
             std::scoped_lock lock(state->mutex);
             switch (state->managerState)
             {
                 case CBManagerStateUnauthorized:
+#if TARGET_OS_IPHONE
+                    reason = "this application is not authorised to use Bluetooth. The user "
+                             "declined the prompt, or has since turned it off under Settings > "
+                             "Privacy & Security > Bluetooth";
+#else
                     reason = "this application is not authorised to use Bluetooth. On macOS 11 and "
                              "later the host application bundle must declare "
                              "NSBluetoothAlwaysUsageDescription, and the user must allow Bluetooth "
                              "access when prompted";
+#endif
                     break;
                 case CBManagerStatePoweredOff:
                     reason = "Bluetooth is turned off";
                     break;
                 case CBManagerStateUnsupported:
+#if TARGET_OS_IPHONE
+                    reason = "this device does not support Bluetooth Low Energy. The iOS Simulator "
+                             "never does -- Bluetooth needs real hardware";
+#else
                     reason = "this Mac does not support Bluetooth Low Energy";
+#endif
                     break;
                 default:
                     reason = "the Bluetooth manager did not become ready";
@@ -646,7 +703,7 @@ public:
 
     std::vector<Advertisement> getDiscovered() override
     {
-        // A peripheral this Mac is connected to has stopped advertising, so didDiscoverPeripheral
+        // A peripheral this host is connected to has stopped advertising, so didDiscoverPeripheral
         // will never fire for it again -- and it is the one peripheral we are certain we can
         // reach. CoreBluetooth can only be asked about connected peripherals by service, which is
         // what setServicesOfInterest is for.
@@ -695,8 +752,8 @@ public:
             [manager retrievePeripheralsWithIdentifiers:@[uuid]];
         if ([known count] == 0)
             throw BleError("Bluetooth device " + id +
-                           " is not known to this Mac. Run a discovery scan first so CoreBluetooth "
-                           "can find it.");
+                           " is not known to this host. Run a discovery scan first so "
+                           "CoreBluetooth can find it.");
 
         CBPeripheral* peripheral = known[0];
         [peripheral setDelegate:delegate];
@@ -796,7 +853,7 @@ public:
 
 private:
     /*!
-     * Peripherals this Mac holds a link to, keyed by identifier.
+     * Peripherals this host holds a link to, keyed by identifier.
      *
      * retrieveConnectedPeripheralsWithServices: takes a non-empty service array and has no
      * "everything" form, so this reports only peripherals hosting a service the module has a
@@ -869,6 +926,11 @@ private:
     }
 
     std::shared_ptr<SharedState> state;
+
+    // Non-empty only when the constructor refused to create a manager, which today happens on iOS
+    // alone, for a host application whose Info.plist is missing the usage description. Always
+    // empty on macOS.
+    std::string unavailable;
 
     // What the openDAQ layer told us it has profiles for; see connectedPeripherals().
     std::vector<std::string> servicesOfInterest;

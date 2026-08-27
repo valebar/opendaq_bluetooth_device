@@ -27,7 +27,16 @@ function(opendaq_bt_add_ble_backend TARGET)
         target_link_libraries(${TARGET} PRIVATE windowsapp)
         target_compile_definitions(${TARGET} PRIVATE OPENDAQ_BT_BACKEND_WINRT)
 
-    elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    elseif (CMAKE_SYSTEM_NAME MATCHES "^(Darwin|iOS)$")
+        # One CoreBluetooth translation unit serves macOS and iOS; the framework, the delegate API
+        # and the manager's own dispatch queue are identical on both. What differs is confined to
+        # the .mm behind TARGET_OS_IPHONE (authorisation wording, the Info.plist pre-flight and the
+        # suppressed power alert) and to how the host application embeds the result.
+        #
+        # Matching only Darwin and iOS rather than APPLE is deliberate: the FATAL_ERROR below is a
+        # safety net, and tvOS, watchOS and visionOS should keep hitting it instead of quietly
+        # building a backend nobody has ever run there.
+        #
         # OBJCXX is enabled by the top-level CMakeLists, not here: enable_language() is only
         # valid at file scope. See the comment there.
         find_library(CORE_BLUETOOTH_FRAMEWORK CoreBluetooth REQUIRED)
@@ -50,6 +59,6 @@ function(opendaq_bt_add_ble_backend TARGET)
     else()
         message(FATAL_ERROR
                 "No BLE backend for CMAKE_SYSTEM_NAME='${CMAKE_SYSTEM_NAME}'. "
-                "Supported: Linux, Windows, Darwin, Android.")
+                "Supported: Linux, Windows, Darwin, iOS, Android.")
     endif()
 endfunction()
