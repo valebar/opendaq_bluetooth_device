@@ -5,16 +5,18 @@ Connect **Bluetooth Low Energy (BLE) sensors and devices to
 openDAQ device module adds Bluetooth discovery, GATT access, measurement signals, smart-trainer
 control, and automatic reconnection through openDAQ's standard device API.
 
-Use it to bring Bluetooth heart-rate sensors, cycling power meters, speed and cadence sensors, and
-FTMS indoor trainers into an openDAQ data-acquisition application. Nearby BLE peripherals appear
+Use it to bring Bluetooth heart-rate sensors, cycling power meters, speed and cadence sensors,
+FTMS indoor trainers, thermometers and temperature sensors into an openDAQ data-acquisition
+application. Nearby BLE peripherals appear
 in normal openDAQ device discovery and connect with a `bluetooth://...` connection string, so an
 application does not need to call BlueZ, C++/WinRT, CoreBluetooth, or `android.bluetooth` directly.
 
 ## openDAQ Bluetooth features
 
 - Discover and connect to Bluetooth Low Energy peripherals through an openDAQ `Instance`.
-- Decode Bluetooth SIG Heart Rate, Cycling Power, Cycling Speed and Cadence, and Fitness Machine
-  Service (FTMS) data into timestamped openDAQ signals.
+- Decode Bluetooth SIG Heart Rate, Cycling Power, Cycling Speed and Cadence, Fitness Machine
+  Service (FTMS), Health Thermometer and Environmental Sensing temperature data into timestamped
+  openDAQ signals.
 - Browse any connected device's GATT services and characteristics as openDAQ properties.
 - Read and write BLE GATT characteristics, including vendor-specific characteristics.
 - Control compatible Bluetooth smart trainers in ERG, resistance, and simulation modes.
@@ -75,7 +77,7 @@ device.setPropertyValue("Nordic UART.Nordic UART RX", "01 A2");
 ## Supported openDAQ Bluetooth measurement signals
 
 A peripheral implementing a GATT service this module understands gets an openDAQ **channel**
-carrying decoded signals, alongside the raw GATT database. Four profiles are implemented:
+carrying decoded signals, alongside the raw GATT database. Six profiles are implemented:
 
 | Service | Channel | What it is |
 | --- | --- | --- |
@@ -83,6 +85,8 @@ carrying decoded signals, alongside the raw GATT database. Four profiles are imp
 | Cycling Power (0x1818) | `CyclingPower` | crank, pedal and hub power meters |
 | Cycling Speed and Cadence (0x1816) | `CyclingSpeedCadence` | magnet-and-pod speed/cadence sensors |
 | Fitness Machine (0x1826) | `FitnessMachine` | smart indoor trainers, including control |
+| Health Thermometer (0x1809) | `HealthThermometer` | clinical and body thermometers |
+| Environmental Sensing (0x181A) | `EnvironmentalSensing` | room and weather sensors (temperature only) |
 
 That registry is also what discovery filters on, so adding a profile widens the device list as
 well as producing channels. A smart trainer typically hosts three of these at once and gets three
@@ -109,6 +113,10 @@ BluetoothDevice
     ├── CyclingSpeedCadence      (Channel)
     │   ├── Cadence         [rpm]   CrankRevolutions [rev]
     │   └── Speed           [km/h]  Distance         [m]   WheelRevolutions [rev]
+    ├── HealthThermometer        (Channel)
+    │   └── Temperature     [°C]    IntermediateTemperature [°C]
+    ├── EnvironmentalSensing     (Channel)
+    │   └── Temperature     [°C]    Temperature2, Temperature3 ... [°C]
     └── FitnessMachine           (Channel)
         ├── Speed / AverageSpeed          [km/h]
         ├── Cadence / AverageCadence      [rpm]
@@ -191,7 +199,20 @@ Each channel also exposes descriptive read-only properties — `SensorLocation` 
 cycling channels, `Features`, `TargetSettingFeatures`, `TrainingStatus` and the supported power and
 resistance ranges on the Fitness Machine one — plus, for heart rate, `SensorContactSupported`,
 `SensorContactDetected`, `BodySensorLocation` and a `ResetEnergyExpended` action where the
-peripheral implements the Heart Rate Control Point (0x2A39).
+peripheral implements the Heart Rate Control Point (0x2A39), and `TemperatureType` (armpit, ear,
+mouth, ...) on the health thermometer.
+
+The temperature profiles always publish **degrees Celsius**; a thermometer reporting Fahrenheit is
+converted. A frame that says it has no reading — an IEEE-11073 NaN or infinity, or the
+Environmental Sensing "unknown" value — produces no sample rather than a fake one. The Health
+Thermometer's own time stamp is ignored, because it may belong to a stored reading from hours ago
+and the domain must stay monotonic; samples are stamped on arrival like everywhere else.
+Environmental Sensing may carry several Temperature characteristics (indoor and outdoor, say):
+each notifying one gets its own signal, `Temperature`, `Temperature2`, ... in GATT order. A
+Temperature characteristic that can only be read is skipped, since this module does not poll, and
+humidity, pressure and the other ESS quantities are not decoded. On macOS, browsing the
+`Environmental Sensing.Temperature` property while its channel is subscribed can add one extra
+sample — the current value — to the signal; see DEVELOPMENT.md.
 
 A peripheral without a recognised service simply gets no channels and behaves exactly as before,
 and so does one whose service is present but unusable — a Fitness Machine that is a treadmill
@@ -213,11 +234,12 @@ streaming have all been run against a live peripheral. Characteristic **writes**
 peripherals connected at the same time** are implemented and compile, but have not been exercised
 against real hardware yet.
 
-The hardware verified on any platform is a heart rate strap. **The cycling power, speed/cadence
-and fitness machine profiles have never been connected to a real device** — they are covered by
-unit tests over the complete flag matrix of each wire format, and they share the connection,
-reconnection and signal machinery the heart rate profile exercises, but no trainer, power meter or
-cadence sensor has been on the other end. Trainer control additionally depends on the
+The hardware verified on any platform is a heart rate strap. **The cycling power, speed/cadence,
+fitness machine, health thermometer and environmental sensing profiles have never been connected
+to a real device** — they are covered by unit tests over the complete flag matrix of each wire
+format, and they share the connection, reconnection and signal machinery the heart rate profile
+exercises, but no trainer, power meter, cadence sensor, thermometer or environmental sensor has
+been on the other end. Trainer control additionally depends on the
 characteristic-write path, unexercised on macOS and Windows.
 
 The Windows backend has now been through a compiler. It builds clean for ARM64 with MSVC 14.4x
@@ -427,7 +449,7 @@ Four things worth knowing:
 | `ConnectionTimeoutMs` | 15000 | per-device | Budget for establishing the link, and again for resolving the GATT database. It applies to each phase separately, not to the total. Also the budget for each reconnection attempt. |
 | `AutoReconnect` | `true` | per-device | Re-establish the link by itself when it drops, indefinitely. Set `false` for the older behaviour: the device goes to `Unrecoverable` and stays there until you remove and re-add it. |
 | `ReconnectIntervalMs` | 5000 | per-device | Gap between reconnection attempts. A *failing* attempt already costs up to `2 x ConnectionTimeoutMs` on Linux, so at the defaults the real cadence is nearer 35 s than 5 s; lower `ConnectionTimeoutMs`, not this, if you need attempts closer together. |
-| `FilterByKnownProfiles` | `true` | module option | Discovery reports only peripherals advertising — or, if connected to this host, exposing — a service this module has a profile for: heart rate, cycling power, cycling speed and cadence, or fitness machine. Peripherals advertising no services at all are hidden too. Set `false` to list everything the adapter can hear or is connected to. |
+| `FilterByKnownProfiles` | `true` | module option | Discovery reports only peripherals advertising — or, if connected to this host, exposing — a service this module has a profile for: heart rate, cycling power, cycling speed and cadence, fitness machine, health thermometer, or environmental sensing. Peripherals advertising no services at all are hidden too. Set `false` to list everything the adapter can hear or is connected to. |
 | `ScanWarmupMs` | 2000 | module default | How long the *first* `getAvailableDevices()` blocks so the radio has a chance to hear something. Later calls never block. |
 | `DeviceTimeoutMs` | 30000 | module default | A peripheral not heard from for this long drops out of discovery. It does not apply to a peripheral connected to this host, which has stopped advertising and would otherwise always time out; that one leaves the list when its link drops. |
 
@@ -614,15 +636,17 @@ consumer ProGuard rules for the JNI bridge.
 ## Project scope and limitations
 
 Discovery, connection, GATT browsing with characteristic reads and writes, and notification-driven
-asynchronous signals for four profiles: Heart Rate, Cycling Power, Cycling Speed and Cadence, and
-the Fitness Machine service for indoor bikes — the last including its control point, so a smart
+asynchronous signals for six profiles: Heart Rate, Cycling Power, Cycling Speed and Cadence,
+Health Thermometer, Environmental Sensing temperature, and the Fitness Machine service for indoor
+bikes — the last including its control point, so a smart
 trainer can be driven in ERG, resistance and simulation modes.
 
 The GATT database as a property tree, one object property per service and one property per
 characteristic. Automatic reconnection when the link drops, with the device's connection status
 published through openDAQ's standard containers.
 
-Not implemented: **profiles beyond those four** (the registry makes them additive); the Fitness
+Not implemented: **profiles beyond those six** (the registry makes them additive); Environmental
+Sensing quantities other than temperature; the Fitness
 Machine service for treadmills, rowers, cross trainers and stair climbers, which carry their own
 data characteristics; the Cycling Power Control Point (0x2A66) and SC Control Point (0x2A55), so
 no zero-offset calibration or counter reset; the Cycling Power Vector (0x2A64); Fitness Machine

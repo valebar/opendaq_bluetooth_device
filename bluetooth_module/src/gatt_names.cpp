@@ -22,6 +22,7 @@ const std::unordered_map<std::string, const char*>& nameTable()
         // Services
         {"00001800-0000-1000-8000-00805f9b34fb", "Generic Access"},
         {"00001801-0000-1000-8000-00805f9b34fb", "Generic Attribute"},
+        {"00001809-0000-1000-8000-00805f9b34fb", "Health Thermometer"},
         {"0000180a-0000-1000-8000-00805f9b34fb", "Device Information"},
         {"0000180d-0000-1000-8000-00805f9b34fb", "Heart Rate"},
         {"0000180f-0000-1000-8000-00805f9b34fb", "Battery Service"},
@@ -41,6 +42,10 @@ const std::unordered_map<std::string, const char*>& nameTable()
         {"00002a04-0000-1000-8000-00805f9b34fb", "Preferred Connection Parameters"},
         {"00002a05-0000-1000-8000-00805f9b34fb", "Service Changed"},
         {"00002a19-0000-1000-8000-00805f9b34fb", "Battery Level"},
+        {"00002a1c-0000-1000-8000-00805f9b34fb", "Temperature Measurement"},
+        {"00002a1d-0000-1000-8000-00805f9b34fb", "Temperature Type"},
+        {"00002a1e-0000-1000-8000-00805f9b34fb", "Intermediate Temperature"},
+        {"00002a21-0000-1000-8000-00805f9b34fb", "Measurement Interval"},
         {"00002a23-0000-1000-8000-00805f9b34fb", "System ID"},
         {"00002a24-0000-1000-8000-00805f9b34fb", "Model Number"},
         {"00002a25-0000-1000-8000-00805f9b34fb", "Serial Number"},

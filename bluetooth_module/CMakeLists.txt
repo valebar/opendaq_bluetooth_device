@@ -28,12 +28,15 @@ set(SRC_Headers
     include/bluetooth_module/profiles/cycling_power_measurement.h
     include/bluetooth_module/profiles/cycling_speed_cadence_channel.h
     include/bluetooth_module/profiles/cycling_speed_cadence_measurement.h
+    include/bluetooth_module/profiles/environmental_sensing_channel.h
     include/bluetooth_module/profiles/fitness_machine_channel.h
     include/bluetooth_module/profiles/gatt_profile.h
+    include/bluetooth_module/profiles/health_thermometer_channel.h
     include/bluetooth_module/profiles/heart_rate_channel.h
     include/bluetooth_module/profiles/heart_rate_measurement.h
     include/bluetooth_module/profiles/indoor_bike_data.h
     include/bluetooth_module/profiles/revolution_tracker.h
+    include/bluetooth_module/profiles/temperature_measurement.h
     include/bluetooth_module/reconnecting_connection.h
     include/bluetooth_module/scan_cache.h
 )
@@ -51,12 +54,15 @@ set(SRC_Sources
     src/profiles/cycling_power_measurement.cpp
     src/profiles/cycling_speed_cadence_channel.cpp
     src/profiles/cycling_speed_cadence_measurement.cpp
+    src/profiles/environmental_sensing_channel.cpp
     src/profiles/fitness_machine_channel.cpp
     src/profiles/gatt_profile.cpp
+    src/profiles/health_thermometer_channel.cpp
     src/profiles/heart_rate_channel.cpp
     src/profiles/heart_rate_measurement.cpp
     src/profiles/indoor_bike_data.cpp
     src/profiles/revolution_tracker.cpp
+    src/profiles/temperature_measurement.cpp
     src/reconnecting_connection.cpp
     src/scan_cache.cpp
 )

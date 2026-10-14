@@ -314,7 +314,9 @@ TEST(BluetoothModule, TellsTheBackendWhichServicesItHasProfilesFor)
     for (const auto* uuid : {"0000180d-0000-1000-8000-00805f9b34fb",    // Heart Rate
                              "00001818-0000-1000-8000-00805f9b34fb",    // Cycling Power
                              "00001816-0000-1000-8000-00805f9b34fb",    // Cycling Speed and Cadence
-                             "00001826-0000-1000-8000-00805f9b34fb"})   // Fitness Machine
+                             "00001826-0000-1000-8000-00805f9b34fb",    // Fitness Machine
+                             "00001809-0000-1000-8000-00805f9b34fb",    // Health Thermometer
+                             "0000181a-0000-1000-8000-00805f9b34fb"})   // Environmental Sensing
         EXPECT_NE(std::find(services.begin(), services.end(), uuid), services.end()) << uuid;
 }
 
