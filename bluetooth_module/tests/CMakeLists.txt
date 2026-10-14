@@ -10,14 +10,17 @@ add_executable(bluetooth_module_tests
     test_cycling_measurements.cpp
     test_cycling_power_channel.cpp
     test_cycling_speed_cadence_channel.cpp
+    test_environmental_sensing_channel.cpp
     test_fitness_machine_channel.cpp
     test_gatt_names.cpp
+    test_health_thermometer_channel.cpp
     test_heart_rate_channel.cpp
     test_heart_rate_measurement.cpp
     test_multi_profile_device.cpp
     test_reconnect.cpp
     test_revolution_tracker.cpp
     test_scan_cache.cpp
+    test_temperature_measurement.cpp
     fake_ble_central.h
 )
 

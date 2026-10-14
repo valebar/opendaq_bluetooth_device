@@ -1,8 +1,10 @@
 #include <bluetooth_module/ble/ble_types.h>
 #include <bluetooth_module/profiles/cycling_power_channel.h>
 #include <bluetooth_module/profiles/cycling_speed_cadence_channel.h>
+#include <bluetooth_module/profiles/environmental_sensing_channel.h>
 #include <bluetooth_module/profiles/fitness_machine_channel.h>
 #include <bluetooth_module/profiles/gatt_profile.h>
+#include <bluetooth_module/profiles/health_thermometer_channel.h>
 #include <bluetooth_module/profiles/heart_rate_channel.h>
 
 BEGIN_NAMESPACE_OPENDAQ_BLUETOOTH
@@ -56,6 +58,30 @@ const std::vector<GattProfile>& gattProfiles()
                const std::shared_ptr<::opendaq_bt::ble::IConnection>& connection,
                const ::opendaq_bt::ble::Service& service) {
                 return createWithImplementation<IChannel, FitnessMachineChannel>(
+                    context, parent, localId, connection, service);
+            }},
+        GattProfile{
+            HealthThermometerChannel::serviceUuid(),
+            "Health Thermometer",
+            "HealthThermometer",
+            [](const ContextPtr& context,
+               const ComponentPtr& parent,
+               const StringPtr& localId,
+               const std::shared_ptr<::opendaq_bt::ble::IConnection>& connection,
+               const ::opendaq_bt::ble::Service& service) {
+                return createWithImplementation<IChannel, HealthThermometerChannel>(
+                    context, parent, localId, connection, service);
+            }},
+        GattProfile{
+            EnvironmentalSensingChannel::serviceUuid(),
+            "Environmental Sensing",
+            "EnvironmentalSensing",
+            [](const ContextPtr& context,
+               const ComponentPtr& parent,
+               const StringPtr& localId,
+               const std::shared_ptr<::opendaq_bt::ble::IConnection>& connection,
+               const ::opendaq_bt::ble::Service& service) {
+                return createWithImplementation<IChannel, EnvironmentalSensingChannel>(
                     context, parent, localId, connection, service);
             }},
     };

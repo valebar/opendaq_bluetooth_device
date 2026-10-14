@@ -69,8 +69,9 @@ adb shell 'cd /data/local/tmp/odbt && LD_LIBRARY_PATH=. ./bluetooth_module_tests
 
 A GATT service the module understands becomes an openDAQ **channel** under the device's IO folder.
 The registry lives in `src/profiles/gatt_profile.cpp` — one `GattProfile` entry per service UUID
-with a channel factory. Four entries today: Heart Rate (0x180D), Cycling Power (0x1818), Cycling
-Speed and Cadence (0x1816) and Fitness Machine (0x1826). Adding another touches nothing outside
+with a channel factory. Six entries today: Heart Rate (0x180D), Cycling Power (0x1818), Cycling
+Speed and Cadence (0x1816), Fitness Machine (0x1826), Health Thermometer (0x1809) and
+Environmental Sensing (0x181A, Temperature only). Adding another touches nothing outside
 that file, its decoder and its channel. The registry drives **discovery** as well as
 channels: `advertisesKnownGattProfile` filters the device list against it, so a new profile widens
 what `getAvailableDevices()` reports, and `setServicesOfInterest` derives from it too.
@@ -327,10 +328,12 @@ dialect settings are also separate from `CMAKE_CXX_*` and are set alongside it.
   distinguish them; the backend attributes an update to an outstanding read if there is one, and
   treats it as a notification otherwise. Do not issue a read and a subscription to the same
   characteristic concurrently. The refresh worker makes that easier to trip over than it used to
-  be: it re-reads every *readable* characteristic whenever one is browsed. Nothing collides today
-  because the only subscribed characteristic, Heart Rate Measurement, is notify-only and so is
-  never refreshed -- but a profile that subscribes to a read-and-notify characteristic would break
-  this on macOS.
+  be: it re-reads every *readable* characteristic whenever one is browsed. ESS Temperature
+  (0x2A6E) is read-and-notify, so this does happen: the read's own reply arrives after the read
+  has been satisfied and is delivered as a notification, adding one extra sample of the current
+  value per browse (at most one a second, given the refresh hold-off). Benign for a temperature
+  level; it would not be for a cumulative counter. Health Thermometer's characteristics are
+  indicate/notify-only and never refreshed.
 - **Discovery counts only genuine RSSI updates as sightings (Linux).** BlueZ's object tree is a
   persistent cache, and it re-announces every device it has met via `InterfacesAdded` the moment
   discovery starts — which reported over 160 devices where about 80 were in range. So
@@ -559,8 +562,8 @@ address-model naming and says nothing about the ISA -- those archives contain AR
 ## Scope
 
 Discovery, connect, the GATT database as a property tree with typed values and characteristic
-read/write, asynchronous signals for the Heart Rate, Cycling Power, Cycling Speed and Cadence and
-Fitness Machine profiles — the last including its control point, so a smart trainer can be driven
+read/write, asynchronous signals for the Heart Rate, Cycling Power, Cycling Speed and Cadence,
+Health Thermometer, Environmental Sensing (temperature) and Fitness Machine profiles — the last including its control point, so a smart trainer can be driven
 in ERG, resistance and simulation modes — and automatic reconnection with the connection status
 published through openDAQ's status containers.
 
@@ -568,11 +571,14 @@ published through openDAQ's status containers.
 covered by unit tests over the full flag matrix of each wire format and share all the connection
 and signal machinery heart rate exercises, but no trainer, power meter or cadence sensor has been
 on the other end, and trainer control depends on the characteristic-write path documented above as
-unexercised on macOS. They should not be described as verified.
+unexercised on macOS. The Health Thermometer and Environmental Sensing profiles are in the same
+position: unit-tested, never connected to a real thermometer or sensor. They should not be
+described as verified.
 
 Android ships an AAR, not an application. The consuming app requests runtime permissions.
 
-Deliberately **not** implemented: profiles beyond those four; the Fitness Machine service for
+Deliberately **not** implemented: profiles beyond those six; ESS quantities other than
+temperature, and polling of a Temperature characteristic that cannot notify; the Fitness Machine service for
 treadmills, rowers, cross trainers and stair climbers, whose data characteristics are named in
 `gatt_names.cpp` but not decoded (`FitnessMachineChannel` declines a machine with no 0x2AD2, which
 is how they are politely skipped); the Cycling Power Control Point (0x2A66) and SC Control Point

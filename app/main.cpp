@@ -143,7 +143,8 @@ int scan(int seconds)
     if (!filterDisabledByEnvironment())
         std::cout << "\nOnly peripherals advertising -- or, if connected to this host, exposing --\n"
                   << "a service this module has a profile for -- heart rate, cycling power,\n"
-                  << "cycling speed and cadence, fitness machine -- are listed. To list\n"
+                  << "cycling speed and cadence, fitness machine, health thermometer,\n"
+                  << "environmental sensing -- are listed. To list\n"
                   << "everything the adapter can hear, set\n"
                   << "  " << FilterEnvVariable << "=false\n";
 
